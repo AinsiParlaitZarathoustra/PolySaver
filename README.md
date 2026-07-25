@@ -1,37 +1,117 @@
+<div align="center">
+
 # PolySaver
 
-**Téléchargez. Profitez.**
+**Collez. Téléchargez. Profitez.**
 
-PolySaver est un téléchargeur vidéo et audio natif, ultra-rapide et sans fioritures pour macOS. Construit pour faire exactement ce qu'on lui demande, sans abonnement, sans publicité et simplement. Vous collez le lien, vous téléchargez.
+Téléchargeur vidéo et audio natif pour macOS. Rapide, gratuit, sans compte, sans publicité, sans abonnement.
 
-## 🚀 Fonctionnalités
+[![Version](https://img.shields.io/badge/version-1.5-3b82f6)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
+[![Platform](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
+[![Rust](https://img.shields.io/badge/Rust-Tauri%20v2-CE422B?logo=rust)](https://tauri.app)
 
-* **Universel** : Télécharge depuis YouTube, Vimeo, X (Twitter), TikTok, Instagram, Arte, Twitch et des centaines d'autres sites.
-* **Profils Intelligents** : 
-    * **Vidéo** : MP4 ou MOV (avec sélection automatique de la meilleure qualité disponible).
-    * **Audio** : MP3, FLAC, WAV, AAC (avec choix précis du débit de sortie).
-* **Hautes Performances** : Lancez jusqu'à **8 téléchargements simultanés**.
-* **Intégration macOS Native** :
-    * Notifications système avec son à la fin de vos téléchargements.
-    * Icône discrète dans la barre des menus (intégration parfaite avec les thèmes clair et sombre via SF Symbols).
-* **Contrôle Total de la Bande Passante** : Limitez la vitesse de téléchargement avec des unités claires (bits, Ko, Mo, Go). En cas de saisie incorrecte, le système sécurise automatiquement la valeur à 10 Mo/s.
-* **Interface Fluide & Intelligente** : Les paramètres se sauvegardent instantanément à la volée. Fini les boutons "Sauvegarder".
-* **Gestion des Erreurs Humaine** : Les erreurs techniques incompréhensibles sont traduites en langage clair ("Absence de connexion internet", "Cette URL n'est pas valide").
-* **Mises à Jour Silencieuses** : Vérification et installation asynchrone des nouvelles versions en un clic depuis les paramètres.
+[**⬇ Télécharger PolySaver V1.5**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
 
-## 🛠 Sous le capot
-
-Une architecture pensée pour la légèreté, la stabilité et la puissance brute :
-
-* **Backend** : Rust & Tauri v2 (Binaire léger, performances réseau natives, sécurité mémoire).
-* **Frontend** : Svelte 5 & Vite (Interface modulaire, réactive et sans bloatware).
-* **Moteurs** : yt-dlp (Extraction) et FFmpeg embarqué de manière transparente (Conversion audio).
-
-## 📦 Installation
-
-1. Téléchargez la dernière version (`PolySaver_1.0.0_aarch64.dmg`) dans l'onglet **[Releases](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)**.
-2. Ouvrez le fichier `.dmg` et glissez PolySaver dans votre dossier Applications.
-3. Lancez et profitez.
+</div>
 
 ---
-*Copyright © 2026 AinsiParlaitZarathoustra. Tous droits réservés.*
+
+## Pourquoi PolySaver
+
+Les téléchargeurs vidéo du marché facturent un abonnement pour des fonctions basiques, affichent de la publicité, ou pèsent 200 Mo pour un simple champ de saisie. PolySaver fait la même chose en mieux : un binaire natif de quelques mégaoctets, écrit en Rust, qui ne demande rien et ne renvoie rien.
+
+## Fonctionnalités
+
+### Deux façons de télécharger
+
+**⚡ Téléchargement rapide** — Un clic. L'URL est analysée et le fichier téléchargé avec vos réglages par défaut. Aucune question posée.
+
+**Téléchargement personnalisé** — Un panneau s'ouvre avec la miniature de la vidéo : choisissez le format, la qualité, le débit audio et la langue des sous-titres avant de lancer.
+
+### Formats
+
+| Vidéo | Audio |
+|---|---|
+| MP4, MOV | MP3, FLAC, WAV, AAC |
+| Sélection de la résolution | Débit configurable (128 / 192 / 320 kbps) |
+
+### Sources
+
+YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Bandcamp — et plusieurs centaines d'autres plateformes.
+
+### Le reste
+
+- **Playlists** — sélectionnez les vidéos une par une ou téléchargez tout
+- **Chapitres YouTube** — extrayez un segment précis d'une vidéo
+- **Sous-titres** — récupérés automatiquement dans votre langue quand ils existent
+- **Téléchargement parallèle** — activez-le et lancez autant de tâches que vous voulez
+- **Limite de bande passante** — en Ko/s ou Mo/s, pour ne pas saturer votre connexion
+- **Notifications macOS** — natives, avec son, à la fin de chaque téléchargement
+- **Barre de menus** — icône SF Symbols qui s'adapte aux thèmes clair et sombre
+- **Historique** — persistant, exportable en CSV, avec détection des doublons
+- **Bilingue** — français et anglais
+- **Messages d'erreur clairs** — « Absence de connexion internet » plutôt qu'une trace technique de trente lignes
+
+## Installation
+
+1. Téléchargez le fichier `.dmg` depuis la page [**Releases**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
+2. Ouvrez-le et glissez PolySaver dans le dossier Applications
+3. Au premier lancement : clic droit sur l'app → **Ouvrir** (l'application n'est pas signée par Apple)
+
+Aucune dépendance à installer. yt-dlp et FFmpeg sont embarqués dans l'application.
+
+> **Configuration requise** — macOS 14 (Sonoma) ou supérieur, Apple Silicon.
+
+## Raccourcis clavier
+
+| Raccourci | Action |
+|---|---|
+| `⌘V` | Coller une URL et l'analyser |
+| `⌘,` | Ouvrir les préférences |
+| `⌘⌫` | Vider les téléchargements terminés |
+| `Escape` | Fermer le panneau ouvert |
+
+## Architecture
+
+| Couche | Technologie |
+|---|---|
+| Application | [Tauri v2](https://tauri.app) — binaire natif, pas d'Electron |
+| Backend | Rust — sécurité mémoire, performances réseau natives |
+| Interface | Svelte 5 + Vite — réactive, modulaire, sans surcouche |
+| Extraction | [yt-dlp](https://github.com/yt-dlp/yt-dlp) — embarqué |
+| Conversion | [FFmpeg](https://ffmpeg.org) — embarqué |
+| Stockage local | [redb](https://github.com/cberner/redb) — base clé-valeur ACID |
+
+## Développement
+
+```bash
+git clone https://github.com/AinsiParlaitZarathoustra/PolySaver.git
+cd PolySaver
+npm install
+cargo tauri dev
+```
+
+Build de production :
+
+```bash
+bash scripts/download-binaries.sh   # Récupère yt-dlp et FFmpeg
+cargo tauri build                    # Génère le .dmg
+```
+
+## Licence
+
+PolySaver est un logiciel propriétaire, gratuit pour un usage personnel. Le code source est ouvert à la lecture et aux contributions, mais la revente et la redistribution commerciale sont interdites. Voir [LICENSE](LICENSE).
+
+## Avertissement
+
+PolySaver est un outil technique. Respectez le droit d'auteur et les conditions d'utilisation des plateformes dont vous téléchargez du contenu.
+
+---
+
+<div align="center">
+
+Copyright © 2026 AinsiParlaitZarathoustra — Tous droits réservés
+
+*Propulsé par Rust et le refus de payer pour ce qui devrait être gratuit.*
+
+</div>

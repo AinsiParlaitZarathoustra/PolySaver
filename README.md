@@ -4,7 +4,7 @@
 
 **Pour le refus de payer ce qui devrait être gratuit**
 
-Téléchargeur vidéo et audio natif pour macOS sans publicité ni abonnement et **rapide 🚀**.
+Téléchargeur vidéo et audio **rapide 🚀** pour macOS sans publicité ni abonnement.
 
 [![Version](https://img.shields.io/badge/version-1.5-3b82f6)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
@@ -81,6 +81,6 @@ PolySaver est un outil technique. Respectez le droit d'auteur et **les condition
 
 Copyright © 2026 AinsiParlaitZarathoustra — Tous droits réservés
 
-*Pour le refus de payer ce qui devrait être gratuit*
+*Amen*
 
 </div>

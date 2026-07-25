@@ -2,15 +2,14 @@
 
 # PolySaver
 
-**Collez. Téléchargez. Profitez.**
+**Pour le refus de payer ce qui devrait être gratuit**
 
 Téléchargeur vidéo et audio natif pour macOS. Rapide, gratuit, sans compte, sans publicité, sans abonnement.
 
 [![Version](https://img.shields.io/badge/version-1.5-3b82f6)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
-[![Rust](https://img.shields.io/badge/Rust-Tauri%20v2-CE422B?logo=rust)](https://tauri.app)
 
-[**⬇ Télécharger PolySaver V1.5**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
+[**⬇ Télécharger PolySaver V1.5**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/PolySaver_V1.5_ARM64/PolySaver_1.5.0_aarch64.dmg)
 
 </div>
 
@@ -41,16 +40,10 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 
 ### Le reste
 
-- **Playlists** — sélectionnez les vidéos une par une ou téléchargez tout
-- **Chapitres YouTube** — extrayez un segment précis d'une vidéo
 - **Sous-titres** — récupérés automatiquement dans votre langue quand ils existent
-- **Téléchargement parallèle** — activez-le et lancez autant de tâches que vous voulez
-- **Limite de bande passante** — en Ko/s ou Mo/s, pour ne pas saturer votre connexion
-- **Notifications macOS** — natives, avec son, à la fin de chaque téléchargement
-- **Barre de menus** — icône SF Symbols qui s'adapte aux thèmes clair et sombre
-- **Historique** — persistant, exportable en CSV, avec détection des doublons
+- **Plusieurs téléchargements à la fois** — activable en un clic dans les réglages
+- **Vitesse ajustable** — plafonnez le débit pour garder de la bande passante pour le reste
 - **Bilingue** — français et anglais
-- **Messages d'erreur clairs** — « Absence de connexion internet » plutôt qu'une trace technique de trente lignes
 
 ## Installation
 
@@ -58,49 +51,25 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 2. Ouvrez-le et glissez PolySaver dans le dossier Applications
 3. Au premier lancement : clic droit sur l'app → **Ouvrir** (l'application n'est pas signée par Apple)
 
-Aucune dépendance à installer. yt-dlp et FFmpeg sont embarqués dans l'application.
-
-> **Configuration requise** — macOS 14 (Sonoma) ou supérieur, Apple Silicon.
+> **Configuration requise** — MacBook M1 ou ultérieur.
 
 ## Raccourcis clavier
 
-| Raccourci | Action |
-|---|---|
-| `⌘V` | Coller une URL et l'analyser |
-| `⌘,` | Ouvrir les préférences |
-| `⌘⌫` | Vider les téléchargements terminés |
-| `Escape` | Fermer le panneau ouvert |
+Les raccourcis disponibles sont indiqués directement dans la barre de menus de l'application.
 
 ## Architecture
 
 | Couche | Technologie |
 |---|---|
-| Application | [Tauri v2](https://tauri.app) — binaire natif, pas d'Electron |
 | Backend | Rust — sécurité mémoire, performances réseau natives |
-| Interface | Svelte 5 + Vite — réactive, modulaire, sans surcouche |
-| Extraction | [yt-dlp](https://github.com/yt-dlp/yt-dlp) — embarqué |
-| Conversion | [FFmpeg](https://ffmpeg.org) — embarqué |
-| Stockage local | [redb](https://github.com/cberner/redb) — base clé-valeur ACID |
-
-## Développement
-
-```bash
-git clone https://github.com/AinsiParlaitZarathoustra/PolySaver.git
-cd PolySaver
-npm install
-cargo tauri dev
-```
-
-Build de production :
-
-```bash
-bash scripts/download-binaries.sh   # Récupère yt-dlp et FFmpeg
-cargo tauri build                    # Génère le .dmg
-```
+| Interface | Svelte — réactive, modulaire, sans surcouche |
+| Extraction | [yt-dlp](https://github.com/yt-dlp/yt-dlp) |
+| Conversion | [FFmpeg](https://ffmpeg.org) |
+| Stockage local | [redb](https://github.com/cberner/redb) |
 
 ## Licence
 
-PolySaver est un logiciel propriétaire, gratuit pour un usage personnel. Le code source est ouvert à la lecture et aux contributions, mais la revente et la redistribution commerciale sont interdites. Voir [LICENSE](LICENSE).
+PolySaver est un logiciel propriétaire, gratuit pour un usage personnel. Le code source est ouvert à la lecture et aux contributions, mais la revente et la redistribution commerciale sont interdites. Voir [LICENSE](https://github.com/AinsiParlaitZarathoustra/PolySaver?tab=License-1-ov-file).
 
 ## Avertissement
 
@@ -112,6 +81,6 @@ PolySaver est un outil technique. Respectez le droit d'auteur et les conditions 
 
 Copyright © 2026 AinsiParlaitZarathoustra — Tous droits réservés
 
-*Propulsé par Rust et le refus de payer pour ce qui devrait être gratuit.*
+*Pour le refus de payer ce qui devrait être gratuit*
 
 </div>

@@ -4,7 +4,7 @@
 
 **Pour le refus de payer ce qui devrait être gratuit**
 
-Téléchargeur vidéo et audio natif pour macOS. Rapide, gratuit, sans compte, sans publicité, sans abonnement.
+Téléchargeur vidéo et audio natif pour macOS sans publicité ni abonnement et **rapide 🚀**.
 
 [![Version](https://img.shields.io/badge/version-1.5-3b82f6)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
@@ -17,13 +17,13 @@ Téléchargeur vidéo et audio natif pour macOS. Rapide, gratuit, sans compte, s
 
 ## Pourquoi PolySaver
 
-Les téléchargeurs vidéo du marché facturent un abonnement pour des fonctions basiques, affichent de la publicité, ou pèsent 200 Mo pour un simple champ de saisie. PolySaver fait la même chose en mieux : un binaire natif de quelques mégaoctets, écrit en Rust, qui ne demande rien et ne renvoie rien.
+Les téléchargeurs vidéo du marché veulent vous vendre un abonnement pour des fonctions de base, affichent de la publicité, ou vous imposent des limites de téléchargement pour vous forcer à payer 💰. PolySaver fait la même chose en (beaucoup) mieux : une app  de quelques mégaoctets, écrite en Rust ⚡️🔒, qui ne demande rien et ne renvoie rien et vous permet de télécharger sur votre ordinateur sans limite aucune les contenus de votre choix.
 
 ## Fonctionnalités
 
 ### Deux façons de télécharger
 
-**⚡ Téléchargement rapide** — Un clic. L'URL est analysée et le fichier téléchargé avec vos réglages par défaut. Aucune question posée.
+**⚡ Téléchargement rapide** — Un clic. L'URL est analysée et le fichier téléchargé avec vos réglages par défaut. 
 
 **Téléchargement personnalisé** — Un panneau s'ouvre avec la miniature de la vidéo : choisissez le format, la qualité, le débit audio et la langue des sous-titres avant de lancer.
 
@@ -69,11 +69,11 @@ Les raccourcis disponibles sont indiqués directement dans la barre de menus de 
 
 ## Licence
 
-PolySaver est un logiciel propriétaire, gratuit pour un usage personnel. Le code source est ouvert à la lecture et aux contributions, mais la revente et la redistribution commerciale sont interdites. Voir [LICENSE](https://github.com/AinsiParlaitZarathoustra/PolySaver?tab=License-1-ov-file).
+PolySaver est un logiciel propriétaire, gratuit pour un usage personnel et qui ne sera **jamais** payant, mais la revente et la redistribution commerciale sont interdites. Voir [LICENSE](https://github.com/AinsiParlaitZarathoustra/PolySaver?tab=License-1-ov-file).
 
 ## Avertissement
 
-PolySaver est un outil technique. Respectez le droit d'auteur et les conditions d'utilisation des plateformes dont vous téléchargez du contenu.
+PolySaver est un outil technique. Respectez le droit d'auteur et **les conditions d'utilisation des plateformes dont vous téléchargez du contenu**.
 
 ---
 

@@ -45,7 +45,7 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 - **Vitesse ajustable** — plafonnez le débit pour garder de la bande passante pour le reste
 - **Bilingue** — français et anglais
 
-### Installation
+## Installation
 🍎 macOS
 Téléchargez le fichier .dmg depuis la page Releases
 Ouvrez-le et glissez PolySaver dans le dossier Applications

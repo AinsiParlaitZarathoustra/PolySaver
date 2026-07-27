@@ -9,7 +9,7 @@ Téléchargeur vidéo et audio **rapide 🚀** pour macOS sans publicité ni abo
 [![Version](https://img.shields.io/badge/version-1.5-3b82f6)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
 
-[**⬇ Télécharger PolySaver V1.5**]([https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/PolySaver_V1.5_ARM64/PolySaver_1.5.0_aarch64.dmg](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_Windows))
+[**⬇ Télécharger PolySaver V1.5**([https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/PolySaver_V1.5_ARM64/PolySaver_1.5.0_aarch64.dmg](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_Windows))
 
 </div>
 

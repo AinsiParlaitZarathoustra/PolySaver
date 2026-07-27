@@ -11,7 +11,7 @@ Téléchargeur vidéo et audio **rapide 🚀** pour macOS sans publicité ni abo
 
 <div align="center">
 
-[**⬇ Télécharger pour macOS (ARM64)**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/PolySaver_V1.5_ARM64/PolySaver_1.5.0_aarch64.dmg) · [**⬇ Télécharger pour Windows**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_Windows)
+[**⬇ Télécharger pour macOS (ARM64)**]([https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/PolySaver_V1.5_ARM64/PolySaver_1.5.0_aarch64.dmg](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_ARM64)) · [**⬇ Télécharger pour Windows**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_Windows)
 
 </div>
 </div>

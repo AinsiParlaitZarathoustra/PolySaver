@@ -46,7 +46,7 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 - **Bilingue** — français et anglais
 
 ## Installation
-🍎 macOS
+🍎 **macOS**
 Téléchargez le fichier .dmg depuis la page Releases
 Ouvrez-le et glissez PolySaver dans le dossier Applications
 Au premier lancement, macOS affichera un avertissement car l'application n'est pas signée par un compte développeur Apple (ce qui coûte une centaine d'euros par an, hors de propos pour un outil gratuit) :
@@ -55,7 +55,7 @@ Confirmez Ouvrir dans la boîte de dialogue
 
 Configuration requise — macOS 14 (Sonoma) ou ultérieur, Apple Silicon (M1 ou ultérieur).
 
-🪟 Windows
+🪟 **Windows**
 Téléchargez le fichier setup.exe depuis la page Releases
 Lancez l'installeur. Windows SmartScreen peut afficher un avertissement car l'application n'est pas signée par un certificat reconnu :
 Cliquez sur Informations complémentaires

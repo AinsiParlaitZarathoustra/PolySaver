@@ -45,13 +45,24 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 - **Vitesse ajustable** — plafonnez le débit pour garder de la bande passante pour le reste
 - **Bilingue** — français et anglais
 
-## Installation
+### Installation
+🍎 macOS
+Téléchargez le fichier .dmg depuis la page Releases
+Ouvrez-le et glissez PolySaver dans le dossier Applications
+Au premier lancement, macOS affichera un avertissement car l'application n'est pas signée par un compte développeur Apple (ce qui coûte une centaine d'euros par an, hors de propos pour un outil gratuit) :
+Clic droit sur l'app → Ouvrir
+Confirmez Ouvrir dans la boîte de dialogue
 
-1. Téléchargez le fichier `.dmg` depuis la page [**Releases**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
-2. Ouvrez-le et glissez PolySaver dans le dossier Applications
-3. Au premier lancement : clic droit sur l'app → **Ouvrir** (l'application n'est pas signée par Apple)
+Configuration requise — macOS 14 (Sonoma) ou ultérieur, Apple Silicon (M1 ou ultérieur).
 
-> **Configuration requise** — MacBook M1 ou ultérieur.
+🪟 Windows
+Téléchargez le fichier setup.exe depuis la page Releases
+Lancez l'installeur. Windows SmartScreen peut afficher un avertissement car l'application n'est pas signée par un certificat reconnu :
+Cliquez sur Informations complémentaires
+Cliquez sur Exécuter quand même
+Suivez les étapes de l'installeur (Suivant → Installer → Terminer)
+
+Configuration requise — Windows 10 (22H2) ou Windows 11.
 
 ## Raccourcis clavier
 

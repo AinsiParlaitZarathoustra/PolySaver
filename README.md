@@ -7,8 +7,8 @@
 Téléchargeur vidéo et audio natif sans publicité ni abonnement et **rapide 🚀**.
 
 [![Version](https://img.shields.io/badge/version-1.5-3b82f6)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
-[![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
-[![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest)
+[![macOS](https://img.shields.io/badge/-000000?logo=apple&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/PolySaver_V1.5_ARM64/PolySaver_1.5.0_aarch64.dmg)
+[![Windows](https://img.shields.io/badge/-0078D6?logo=windows&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_Windows)
 
 [**⬇ Télécharger pour macOS (ARM64)**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/PolySaver_V1.5_ARM64/PolySaver_1.5.0_aarch64.dmg) · [**⬇ Télécharger pour Windows**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_Windows)
 

@@ -55,7 +55,7 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
    - Clic droit sur l'app → **Ouvrir**
    - Confirmez **Ouvrir** dans la boîte de dialogue
 
-> **Configuration requise** — macOS 14 (Sonoma) ou ultérieur, Apple Silicon (M1 ou ultérieur).
+> **Configuration requise** — macOS 14 Sonoma ou ultérieur, Apple Silicon M1 ou ultérieur.
 
 ### 🪟 Windows
 

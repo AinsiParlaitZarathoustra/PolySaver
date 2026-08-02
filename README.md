@@ -70,7 +70,7 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 
 ## Laisser un avis
 
-- **Possibilité de me contacter sur Reddit** → [r/PolySaver](https://www.reddit.com/r/PolySaver/)
+- **Possibilité de nous contacter sur Reddit** → [r/PolySaver](https://www.reddit.com/r/PolySaver/)
 - **Possibilité de déposer une "issue"** si vous rencontrez un bug ou souhaitez proposer quelque chose
 
 ## Architecture
@@ -99,14 +99,7 @@ Copyright © 2026 AinsiParlaitZarathoustra — Tous droits réservés
 
 *Amen*
 
-</div>- **Bilingue** — français et anglais
-
-## Installation
-
-### 🍎 macOS
-
-1. Téléchargez le fichier `.dmg` depuis la page [**Releases**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases#release-PolySaver_V1.5_ARM64)
-2. Ouvrez-le et glissez PolySaver dans le dossier Applications
+</div>2. Ouvrez-le et glissez PolySaver dans le dossier Applications
 3. Au premier lancement, macOS affichera un avertissement car l'application n'est pas signée par un compte développeur Apple (ce qui coûte une centaine d'euros par an, hors de propos pour un outil gratuit) :
    - Clic droit sur l'app → **Ouvrir**
    - Confirmez **Ouvrir** dans la boîte de dialogue

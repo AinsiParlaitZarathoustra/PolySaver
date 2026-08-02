@@ -70,7 +70,7 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 
 ## Laisser un avis
 
-- **Possibilité de nous contacter sur Reddit** → [r/PolySaver](https://www.reddit.com/r/PolySaver/)
+- **Possibilité de me contacter sur Reddit** → [r/PolySaver](https://www.reddit.com/r/PolySaver/)
 - **Possibilité de déposer une "issue"** si vous rencontrez un bug ou souhaitez proposer quelque chose
 
 ## Architecture

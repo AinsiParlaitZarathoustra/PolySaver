@@ -113,6 +113,9 @@ case "${PLATFORM}" in
 
             DAV1D_VERSION="1.5.3"
             DAV1D_SOURCE_URL="https://code.videolan.org/videolan/dav1d/-/archive/${DAV1D_VERSION}/dav1d-${DAV1D_VERSION}.tar.gz"
+            LAME_VERSION="3.100"
+            LAME_SOURCE_URL="https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz"
+            LAME_SOURCE_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
             FFMPEG_SOURCE_URL="https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz"
             FFMPEG_SOURCE_SHA256="cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
 
@@ -126,22 +129,48 @@ case "${PLATFORM}" in
             PATH="${BUILD_TMP}/venv/bin:$PATH" ninja -C build
             cp -f "${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/build/src/libdav1d.a" "${STATIC_LIBS_DIR}/"
 
-            if [ -f "/opt/homebrew/lib/libmp3lame.a" ]; then
-                cp "/opt/homebrew/lib/libmp3lame.a" "${STATIC_LIBS_DIR}/"
-            elif [ -f "/usr/local/lib/libmp3lame.a" ]; then
-                cp "/usr/local/lib/libmp3lame.a" "${STATIC_LIBS_DIR}/"
+            LAME_ARCHIVE="${BUILD_TMP}/lame.tar.gz"
+            curl -fsSL -o "${LAME_ARCHIVE}" "${LAME_SOURCE_URL}"
+            verify_hash "${LAME_ARCHIVE}" "${LAME_SOURCE_SHA256}"
+            tar -xzf "${LAME_ARCHIVE}" -C "${BUILD_TMP}"
+            LAME_SOURCE_DIR="${BUILD_TMP}/lame-${LAME_VERSION}"
+            cd "${LAME_SOURCE_DIR}"
+            ./configure \
+                --prefix="${BUILD_TMP}/lame-dist" \
+                --disable-shared \
+                --enable-static \
+                --disable-frontend
+            make -j8
+            make install
+            LAME_PREFIX="${BUILD_TMP}/lame-dist"
+            cp -f "${LAME_PREFIX}/lib/libmp3lame.a" "${STATIC_LIBS_DIR}/"
+
+            X264_PREFIX="$(brew --prefix x264)"
+            if [ ! -f "${X264_PREFIX}/lib/libx264.a" ]; then
+                echo "[ERROR] Static x264 library not found under ${X264_PREFIX}"
+                exit 1
             fi
-            if [ -f "/opt/homebrew/lib/libx264.a" ]; then
-                cp "/opt/homebrew/lib/libx264.a" "${STATIC_LIBS_DIR}/"
-            elif [ -f "/usr/local/lib/libx264.a" ]; then
-                cp "/usr/local/lib/libx264.a" "${STATIC_LIBS_DIR}/"
-            fi
+            cp -f "${X264_PREFIX}/lib/libx264.a" "${STATIC_LIBS_DIR}/"
 
             cat << EOF > "${PKG_CONFIG_BIN}/pkg-config"
 #!/bin/bash
 case "\$*" in
     *"--exists"*) exit 0 ;;
-    *"--cflags"*) echo "-I/opt/homebrew/include -I/usr/local/include -I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/include" ;;
+    *"--modversion"*)
+        if [[ "\$*" == *"libmp3lame"* ]]; then echo "${LAME_VERSION}"
+        elif [[ "\$*" == *"x264"* ]]; then echo "0.165.3222"
+        else echo "${DAV1D_VERSION}"
+        fi
+        ;;
+    *"--cflags"*"--libs"*|*"--libs"*"--cflags"*)
+        printf '%s ' "-I${LAME_PREFIX}/include" "-I${X264_PREFIX}/include" "-I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/include" "-I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/build/include"
+        if [[ "\$*" == *"dav1d"* ]]; then echo "-L${STATIC_LIBS_DIR} -ldav1d -lm -lpthread"
+        elif [[ "\$*" == *"x264"* ]]; then echo "-L${STATIC_LIBS_DIR} -lx264 -lm -lpthread"
+        elif [[ "\$*" == *"mp3lame"* ]]; then echo "-L${STATIC_LIBS_DIR} -lmp3lame -lm"
+        else echo "-L${STATIC_LIBS_DIR}"
+        fi
+        ;;
+    *"--cflags"*) echo "-I${LAME_PREFIX}/include -I${X264_PREFIX}/include -I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/include -I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/build/include" ;;
     *"--libs"*)
         if [[ "\$*" == *"dav1d"* ]]; then echo "-L${STATIC_LIBS_DIR} -ldav1d -lm -lpthread"
         elif [[ "\$*" == *"x264"* ]]; then echo "-L${STATIC_LIBS_DIR} -lx264 -lm -lpthread"
@@ -149,7 +178,6 @@ case "\$*" in
         else echo "-L${STATIC_LIBS_DIR}"
         fi
         ;;
-    *"--modversion"*) echo "1.5.3" ;;
     *) exit 0 ;;
 esac
 EOF
@@ -176,7 +204,7 @@ EOF
                 --disable-xlib \
                 --disable-libxcb \
                 --disable-sdl2 \
-                --extra-cflags="-I/opt/homebrew/include -I/usr/local/include -I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/include" \
+                --extra-cflags="-I${LAME_PREFIX}/include -I${X264_PREFIX}/include -I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/include -I${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}/build/include" \
                 --extra-ldflags="-L${STATIC_LIBS_DIR}" \
                 --cc=clang
 

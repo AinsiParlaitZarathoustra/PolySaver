@@ -47,11 +47,11 @@ jobs:
           path: |
             /tmp/polysaver_macos-aarch64_ffmpeg
             /tmp/polysaver_macos-aarch64_ffprobe
-          key: polysaver-sidecars-macos-aarch64-ffmpeg-9.0.1
+          key: polysaver-sidecars-macos-aarch64-ffmpeg-9.0.1-lame-3.100
 
       - name: Prepare native sidecars
         run: |
-          brew install lame x264 pkg-config
+          brew install x264 pkg-config
           bash scripts/prepare-sidecars.sh macos-aarch64
 
       - name: Rustfmt Check

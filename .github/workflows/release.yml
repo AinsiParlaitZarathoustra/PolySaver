@@ -137,9 +137,17 @@ jobs:
         with:
           key: release-aarch64-apple-darwin
 
+      - name: Cache native sidecars
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/polysaver_macos-aarch64_ffmpeg
+            /tmp/polysaver_macos-aarch64_ffprobe
+          key: polysaver-sidecars-macos-aarch64-ffmpeg-9.0.1-lame-3.100
+
       - name: Install dependencies
         run: |
-          brew install lame x264 pkg-config
+          brew install x264 pkg-config
           npm ci
 
       - name: Import optional Apple certificate
@@ -244,9 +252,17 @@ jobs:
         with:
           key: release-x86_64-apple-darwin
 
+      - name: Cache native sidecars
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/polysaver_macos-x86_64_ffmpeg
+            /tmp/polysaver_macos-x86_64_ffprobe
+          key: polysaver-sidecars-macos-x86_64-ffmpeg-9.0.1-lame-3.100
+
       - name: Install dependencies
         run: |
-          brew install lame x264 pkg-config
+          brew install x264 pkg-config
           npm ci
 
       - name: Import optional Apple certificate

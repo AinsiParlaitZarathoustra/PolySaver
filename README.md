@@ -40,7 +40,7 @@ Les téléchargeurs vidéo du marché veulent vous vendre un abonnement pour des
 
 ### Sources
 
-YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Bandcamp — et plusieurs centaines d'autres plateformes.
+YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Bandcamp — et plusieurs centaines d'autres plateformes.YT-DLP permet de télécharger du contenu sur plus de 1700 sites... rien que ça...
 
 ### Le reste
 

@@ -112,7 +112,8 @@ case "${PLATFORM}" in
             mkdir -p "${STATIC_LIBS_DIR}" "${PKG_CONFIG_BIN}"
 
             DAV1D_VERSION="1.5.3"
-            DAV1D_SOURCE_URL="https://code.videolan.org/videolan/dav1d/-/archive/${DAV1D_VERSION}/dav1d-${DAV1D_VERSION}.tar.gz"
+            DAV1D_SOURCE_URL="https://github.com/videolan/dav1d/archive/refs/tags/${DAV1D_VERSION}.tar.gz"
+            DAV1D_SOURCE_SHA256="cbe212b02faf8c6eed5b6d55ef8a6e363aaab83f15112e960701a9c3df813686"
             LAME_VERSION="3.100"
             LAME_SOURCE_URL="https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz"
             LAME_SOURCE_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
@@ -121,7 +122,10 @@ case "${PLATFORM}" in
 
             DAV1D_BUILD_DIR="${BUILD_TMP}/dav1d"
             mkdir -p "${DAV1D_BUILD_DIR}"
-            curl -fsSL "${DAV1D_SOURCE_URL}" | tar -xz -C "${DAV1D_BUILD_DIR}"
+            DAV1D_ARCHIVE="${BUILD_TMP}/dav1d.tar.gz"
+            curl -fsSL --retry 5 --retry-all-errors -o "${DAV1D_ARCHIVE}" "${DAV1D_SOURCE_URL}"
+            verify_hash "${DAV1D_ARCHIVE}" "${DAV1D_SOURCE_SHA256}"
+            tar -xzf "${DAV1D_ARCHIVE}" -C "${DAV1D_BUILD_DIR}"
             cd "${DAV1D_BUILD_DIR}/dav1d-${DAV1D_VERSION}"
             python3 -m venv "${BUILD_TMP}/venv"
             "${BUILD_TMP}/venv/bin/pip" install --quiet meson ninja

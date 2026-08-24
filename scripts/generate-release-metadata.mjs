@@ -30,9 +30,6 @@ const expectedFiles = {
   macArmDmg: 'PolySaver_' + version + '_macOS_arm64.dmg',
   macArmUpdater: 'PolySaver_' + version + '_macOS_arm64.app.tar.gz',
   macArmSignature: 'PolySaver_' + version + '_macOS_arm64.app.tar.gz.sig',
-  macIntelDmg: 'PolySaver_' + version + '_macOS_x64.dmg',
-  macIntelUpdater: 'PolySaver_' + version + '_macOS_x64.app.tar.gz',
-  macIntelSignature: 'PolySaver_' + version + '_macOS_x64.app.tar.gz.sig',
   windowsExe: 'PolySaver_' + version + '_Windows_x64_Setup.exe',
   windowsExeSignature: 'PolySaver_' + version + '_Windows_x64_Setup.exe.sig',
   windowsMsi: 'PolySaver_' + version + '_Windows_x64.msi',
@@ -70,10 +67,6 @@ const manifest = {
       signature: readSignature(expectedFiles.macArmSignature),
       url: assetUrl(expectedFiles.macArmUpdater),
     },
-    'darwin-x86_64': {
-      signature: readSignature(expectedFiles.macIntelSignature),
-      url: assetUrl(expectedFiles.macIntelUpdater),
-    },
     'windows-x86_64': {
       signature: readSignature(expectedFiles.windowsExeSignature),
       url: assetUrl(expectedFiles.windowsExe),
@@ -106,14 +99,14 @@ const finalAssetNames = readdirSync(releaseDirectory).sort((left, right) =>
   left.localeCompare(right),
 );
 
-if (finalAssetNames.length !== 15) {
+if (finalAssetNames.length !== 12) {
   throw new Error(
-    'Expected exactly 15 release assets, found ' +
+    'Expected exactly 12 release assets, found ' +
       finalAssetNames.length +
       ': ' +
       finalAssetNames.join(', '),
   );
 }
 
-console.log('Validated six installers and generated latest.json plus SHA256SUMS.txt.');
+console.log('Validated five installers and generated latest.json plus SHA256SUMS.txt.');
 console.log(finalAssetNames.join('\n'));

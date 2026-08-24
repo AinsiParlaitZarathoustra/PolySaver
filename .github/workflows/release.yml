@@ -212,122 +212,6 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
-  macos-intel:
-    name: macOS Intel
-    needs: validate
-    runs-on: macos-15-intel
-    timeout-minutes: 180
-    permissions:
-      contents: read
-    env:
-      TARGET: x86_64-apple-darwin
-      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Verify native runner
-        run: test "$(uname -m)" = "x86_64"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.96.0
-          targets: x86_64-apple-darwin
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-x86_64-apple-darwin
-
-      - name: Cache native sidecars
-        uses: actions/cache@v4
-        with:
-          path: |
-            /tmp/polysaver_macos-x86_64_ffmpeg
-            /tmp/polysaver_macos-x86_64_ffprobe
-          key: polysaver-sidecars-macos-x86_64-ffmpeg-9.0.1-lame-3.100
-
-      - name: Install dependencies
-        run: |
-          brew install x264 pkg-config
-          npm ci
-
-      - name: Import optional Apple certificate
-        if: env.APPLE_CERTIFICATE != ''
-        run: |
-          set -euo pipefail
-          certificate_path="${RUNNER_TEMP}/polysaver-certificate.p12"
-          keychain_path="${RUNNER_TEMP}/polysaver-signing.keychain-db"
-          printf '%s' "${APPLE_CERTIFICATE}" | base64 -D > "${certificate_path}"
-          security create-keychain -p temporary "${keychain_path}"
-          security set-keychain-settings -lut 21600 "${keychain_path}"
-          security unlock-keychain -p temporary "${keychain_path}"
-          security import "${certificate_path}" -P "${APPLE_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
-          security set-key-partition-list -S apple-tool:,apple: -k temporary "${keychain_path}"
-          security list-keychains -d user -s "${keychain_path}"
-
-      - name: Prepare sidecars
-        run: bash scripts/prepare-sidecars.sh macos-x86_64
-
-      - name: Verify sidecar architecture
-        run: |
-          set -euo pipefail
-          for binary in yt-dlp ffmpeg ffprobe; do
-            lipo -archs "src-tauri/resources/bin/${binary}" | grep -qw x86_64
-          done
-
-      - name: Build application, DMG and updater
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-        run: npx @tauri-apps/cli build --target "${TARGET}" --bundles dmg,app
-
-      - name: Stage verified macOS Intel assets
-        run: |
-          set -euo pipefail
-          bundle_root="target/${TARGET}/release/bundle"
-          app_path="$(find "${bundle_root}/macos" -maxdepth 1 -type d -name '*.app' | head -n 1)"
-          dmg_path="$(find "${bundle_root}/dmg" -maxdepth 1 -type f -name '*.dmg' | head -n 1)"
-          updater_path="$(find "${bundle_root}/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | head -n 1)"
-          signature_path="${updater_path}.sig"
-
-          for path in "${app_path}" "${dmg_path}" "${updater_path}" "${signature_path}"; do
-            if [ -z "${path}" ] || [ ! -e "${path}" ]; then
-              echo "::error::Missing macOS Intel release asset"
-              exit 1
-            fi
-          done
-
-          codesign --verify --deep --strict "${app_path}"
-          hdiutil verify "${dmg_path}"
-
-          mkdir -p release-out
-          cp "${dmg_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_x64.dmg"
-          cp "${updater_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_x64.app.tar.gz"
-          cp "${signature_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_x64.app.tar.gz.sig"
-
-      - name: Upload macOS Intel assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-macos-intel
-          path: release-out/*
-          if-no-files-found: error
-          retention-days: 2
-
   windows:
     name: Windows x64
     needs: validate
@@ -504,7 +388,6 @@ jobs:
     needs:
       - validate
       - macos-arm64
-      - macos-intel
       - windows
       - linux
     runs-on: ubuntu-24.04
@@ -523,12 +406,6 @@ jobs:
         with:
           name: release-macos-arm64
           path: release-input/macos-arm64
-
-      - name: Download macOS Intel assets
-        uses: actions/download-artifact@v4
-        with:
-          name: release-macos-intel
-          path: release-input/macos-intel
 
       - name: Download Windows assets
         uses: actions/download-artifact@v4
@@ -570,12 +447,11 @@ jobs:
 
           Téléchargez uniquement le fichier correspondant à votre système :
 
-          - macOS Apple Silicon : PolySaver_${RELEASE_VERSION}_macOS_arm64.dmg
-          - macOS Intel : PolySaver_${RELEASE_VERSION}_macOS_x64.dmg
+          - macOS 14+ avec puce Apple : PolySaver_${RELEASE_VERSION}_macOS_arm64.dmg
           - Windows : PolySaver_${RELEASE_VERSION}_Windows_x64_Setup.exe
           - Windows administré : PolySaver_${RELEASE_VERSION}_Windows_x64.msi
-          - Linux universel : PolySaver_${RELEASE_VERSION}_Linux_x64.AppImage
-          - Ubuntu, Debian et Mint : PolySaver_${RELEASE_VERSION}_Linux_x64.deb
+          - Linux x64 récent : PolySaver_${RELEASE_VERSION}_Linux_x64.AppImage
+          - Ubuntu 22.04+, Debian 12+ et Linux Mint récent : PolySaver_${RELEASE_VERSION}_Linux_x64.deb
 
           Les autres fichiers servent aux mises à jour automatiques et à la vérification d’intégrité.
           EOF

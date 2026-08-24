@@ -1,6 +1,6 @@
 <div align="center">
 
-![PolySaver on PC, Mac and Linux](./polysaver_bannière.png)
+![PolySaver on PC, Mac and Linux](./Polysaver_bannière.png)
 
 # PolySaver
 

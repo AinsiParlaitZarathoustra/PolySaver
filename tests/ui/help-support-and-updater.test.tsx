@@ -169,8 +169,8 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
   // 5. Updater manual check and install flow
   it('checks for updates, handles available update, and disables install during active download', async () => {
     const updateInfo: UpdateInfo = {
-      version: '0.2.0',
-      currentVersion: '0.1.0',
+      version: '2.1.0',
+      currentVersion: '2.0.0',
       body: 'Bugfixes and new features',
       date: '2026-08-24',
     };
@@ -194,7 +194,7 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
     fireEvent.click(checkBtn);
 
     await waitFor(() => {
-      expect(screen.getByText('Version 0.2.0 disponible')).toBeInTheDocument();
+      expect(screen.getByText('Version 2.1.0 disponible')).toBeInTheDocument();
     });
 
     // Warning is visible and update button is disabled because hasActiveDownloads is true

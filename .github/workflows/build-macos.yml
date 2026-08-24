@@ -1,0 +1,75 @@
+name: Build macOS
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version string to verify and bundle (e.g. 0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  build-macos-aarch64:
+    name: Build macOS (aarch64)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+      - name: Provision macOS Sidecars
+        run: bash scripts/prepare-sidecars.sh macos-aarch64
+
+      - name: Build Tauri macOS Release Bundle
+        run: npx @tauri-apps/cli build --bundles dmg,app
+
+      - name: Verify macOS Application & Disk Image
+        run: |
+          set -euo pipefail
+          echo "=== Verifying macOS Application Bundle ==="
+          APP_PATH="target/release/bundle/macos/PolySaver.app"
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "[ERROR] ${APP_PATH} not found!"
+            exit 1
+          fi
+
+          codesign --verify --deep --strict "${APP_PATH}"
+          echo "[OK] Application signature verified ad-hoc."
+
+          echo "=== Verifying macOS DMG Image ==="
+          DMG_PATH="$(find target/release/bundle/dmg -name '*.dmg' | head -n 1)"
+          if [ -z "${DMG_PATH}" ] || [ ! -f "${DMG_PATH}" ]; then
+            echo "[ERROR] No DMG bundle found!"
+            exit 1
+          fi
+
+          if [ ! -s "${DMG_PATH}" ]; then
+            echo "[ERROR] DMG bundle ${DMG_PATH} is empty!"
+            exit 1
+          fi
+
+          hdiutil verify "${DMG_PATH}"
+          echo "[OK] DMG integrity verified with hdiutil: ${DMG_PATH}"
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: polysaver-macos-aarch64
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 1

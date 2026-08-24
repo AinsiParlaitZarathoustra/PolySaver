@@ -1,0 +1,103 @@
+name: Build Linux
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version string to verify and bundle (e.g. 0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  build-linux-x64:
+    name: Build Linux (x64)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+      - name: Provision Linux Sidecars
+        run: bash scripts/prepare-sidecars.sh linux-x64
+
+      - name: Build Tauri Linux Release Bundle
+        run: npx @tauri-apps/cli build --bundles appimage,deb
+
+      - name: Verify Linux Packages & Sidecars
+        run: |
+          set -euo pipefail
+          echo "=== Verifying Linux AppImage ==="
+          APPIMAGE_PATH="$(find target/release/bundle/appimage -name '*.AppImage' | head -n 1)"
+          if [ -z "${APPIMAGE_PATH}" ] || [ ! -f "${APPIMAGE_PATH}" ]; then
+            echo "[ERROR] No AppImage bundle found!"
+            exit 1
+          fi
+
+          if [ ! -s "${APPIMAGE_PATH}" ]; then
+            echo "[ERROR] AppImage ${APPIMAGE_PATH} is empty!"
+            exit 1
+          fi
+          echo "[OK] Found AppImage: ${APPIMAGE_PATH}"
+
+          echo "=== Verifying Linux DEB Package ==="
+          DEB_PATH="$(find target/release/bundle/deb -name '*.deb' | head -n 1)"
+          if [ -z "${DEB_PATH}" ] || [ ! -f "${DEB_PATH}" ]; then
+            echo "[ERROR] No DEB bundle found!"
+            exit 1
+          fi
+
+          if [ ! -s "${DEB_PATH}" ]; then
+            echo "[ERROR] DEB package ${DEB_PATH} is empty!"
+            exit 1
+          fi
+          echo "[OK] Found DEB package: ${DEB_PATH}"
+
+          echo "=== Verifying Linux Sidecar Binaries ==="
+          for bin in yt-dlp ffmpeg ffprobe; do
+            if [ ! -f "src-tauri/resources/bin/${bin}" ]; then
+              echo "[ERROR] Missing expected sidecar: src-tauri/resources/bin/${bin}"
+              exit 1
+            fi
+            # Verify ELF magic bytes (0x7F 'E' 'L' 'F')
+            MAGIC="$(head -c 4 "src-tauri/resources/bin/${bin}")"
+            if [ "${MAGIC}" != $'\x7fELF' ]; then
+              echo "[ERROR] ${bin} is not a valid Linux ELF binary!"
+              exit 1
+            fi
+            echo "[OK] Verified Linux ELF binary: ${bin}"
+          done
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: polysaver-linux-x64
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 1

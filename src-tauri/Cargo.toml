@@ -1,0 +1,28 @@
+[package]
+name = "polysaver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PolySaver V2 Tauri Desktop Application"
+
+[dependencies]
+polysaver-core = { workspace = true }
+polysaver-binres = { workspace = true }
+polysaver-ytdlp = { workspace = true }
+polysaver-ffmpeg = { workspace = true }
+polysaver-storage = { workspace = true }
+tauri = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
+tauri-plugin-opener = { workspace = true }
+tauri-plugin-updater = { workspace = true }
+tauri-plugin-process = { workspace = true }
+
+[build-dependencies]
+tauri-build = { workspace = true }

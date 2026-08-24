@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PolySaver",
+  "version": "0.1.0",
+  "identifier": "io.github.ainsiparlaitzarathoustra.polysaver",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PolySaver",
+        "width": 960,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 540,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data: https://i.ytimg.com https://*.ytimg.com https://img.youtube.com; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkxQUU0MDEzNDBDRjI3M0UKUldRK0o4OUFFMEN1a2JTZ0dJejVvbTR5anljRjZhOEt0Qkc1cHlQUTllOU05aUJhM21kNkYrL3EK",
+      "endpoints": [
+        "https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/latest/download/latest.json"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "resources/bin/*": "bin/"
+    }
+  }
+}

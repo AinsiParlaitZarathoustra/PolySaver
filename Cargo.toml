@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/polysaver-binres",
+    "crates/polysaver-core",
+    "crates/polysaver-ytdlp",
+    "crates/polysaver-ffmpeg",
+    "crates/polysaver-storage",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+authors = ["PolySaver contributors"]
+homepage = "https://github.com/AinsiParlaitZarathoustra/PolySaver"
+repository = "https://github.com/AinsiParlaitZarathoustra/PolySaver"
+rust-version = "1.85.0"
+
+[workspace.dependencies]
+polysaver-binres = { path = "crates/polysaver-binres" }
+polysaver-core = { path = "crates/polysaver-core" }
+polysaver-ytdlp = { path = "crates/polysaver-ytdlp" }
+polysaver-ffmpeg = { path = "crates/polysaver-ffmpeg" }
+polysaver-storage = { path = "crates/polysaver-storage" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.43", features = ["sync", "macros", "rt", "rt-multi-thread", "fs", "time", "process", "io-util"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+async-trait = "0.1"
+regex = "1.10"
+tokio-util = "0.7"
+
+# Tauri v2 dependencies (strictly isolated in src-tauri)
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2" }
+tauri-plugin-dialog = { version = "2" }
+tauri-plugin-opener = { version = "2" }
+tauri-plugin-updater = { version = "2" }
+tauri-plugin-process = { version = "2" }

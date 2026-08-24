@@ -1,0 +1,36 @@
+# Third-Party Licenses & Embedded Binaries
+
+PolySaver V2 embeds and/or interacts with third-party software components. This document provides provenance, versions, cryptographic checksums, and license information for all embedded binaries and dependencies across all supported target platforms (macOS, Windows, Linux).
+
+---
+
+## 1. Embedded External Binaries
+
+### yt-dlp
+- **Project**: [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- **Version**: `2026.08.19`
+- **Platforms**:
+  - **macOS ARM64**: `yt-dlp_macos` (`0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202`)
+  - **Windows x64**: `yt-dlp.exe` (`66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a`)
+  - **Linux x64**: `yt-dlp_linux` (`58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a`)
+- **License**: [The Unlicense](https://unlicense.org/) (Public Domain dedication)
+
+### FFmpeg & FFprobe (Static standalone builds with AV1, MP3, FLAC, AAC, H.264)
+- **Project**: [FFmpeg](https://ffmpeg.org/)
+- **Version**: `9.0.1` (Release `Lei`)
+- **Platforms**:
+  - **macOS ARM64**: Static build from source with `libdav1d` 1.5.3, `libmp3lame`, `libx264`, `VideoToolbox`, `AudioToolbox` (Source tarball SHA-256: `cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635`).
+  - **Windows x64**: BtbN reproducible static GPL release `ffmpeg-n9.0.1-6-g9d4ca21220-win64-gpl-9.0.zip` (Archive SHA-256: `7b777da65c0f93a3f9f524997b2852612d984e39249ca241b63da193ce7e4435`).
+  - **Linux x64**: BtbN reproducible static GPL release `ffmpeg-n9.0.1-6-g9d4ca21220-linux64-gpl-9.0.tar.xz` (Archive SHA-256: `b32f5844b258b4367896b1aa6839ee72ee96d5c7c9136873f66b3c4a1fc2c1df`).
+- **License**: GNU General Public License version 3.0+ (GPL-3.0-or-later)
+
+### dav1d (AV1 Software Decoder)
+- **Project**: [dav1d (VideoLAN)](https://code.videolan.org/videolan/dav1d)
+- **Version**: `1.5.3`
+- **License**: 2-Clause BSD License
+
+---
+
+## 2. Compatibility with PolySaver GPL-3.0
+
+PolySaver V2 is distributed under the terms of the **GNU General Public License version 3.0 (GPL-3.0-only)**. All third-party binaries, libraries, and dependencies included or invoked by PolySaver comply with GPL-3.0 licensing requirements.

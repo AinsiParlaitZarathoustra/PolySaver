@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+target/
+
+# Build artifacts
+dist/
+dist-ssr/
+*.local
+src-tauri/target/
+
+# Tauri generated files
+src-tauri/gen/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.sublime-project
+*.sublime-workspace
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test coverage
+coverage/
+
+# PolySaver temporary caches
+tmp/
+scratch/
+
+# Provisioned binary sidecars (downloaded via scripts/prepare-sidecars.sh)
+src-tauri/resources/bin/

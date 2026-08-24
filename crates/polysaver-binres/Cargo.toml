@@ -1,0 +1,14 @@
+[package]
+name = "polysaver-binres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "High-performance cached binary sidecar resolver for PolySaver V2"
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security-scan:
+    name: Gitleaks Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  backend-checks:
+    name: Rust Backend & Security Checks
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rustfmt Check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy Linter
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Cargo Test
+        run: cargo test --workspace --all-features
+
+      - name: Cargo Tree Check
+        run: cargo tree --workspace
+
+      - name: Install cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  frontend-checks:
+    name: Frontend Quality & Unit Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Architectural Boundaries Check
+        run: npm run check:boundaries
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: TypeScript Typecheck
+        run: npm run typecheck
+
+      - name: Vitest Unit Tests
+        run: npm run test -- --run
+
+      - name: Vite Build
+        run: npm run build

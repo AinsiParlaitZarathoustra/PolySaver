@@ -24,16 +24,35 @@ jobs:
 
   backend-checks:
     name: Rust Backend & Security Checks
-    runs-on: macos-latest
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache native sidecars
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/polysaver_macos-aarch64_ffmpeg
+            /tmp/polysaver_macos-aarch64_ffprobe
+          key: polysaver-sidecars-macos-aarch64-ffmpeg-9.0.1
+
+      - name: Prepare native sidecars
+        run: |
+          brew install lame x264 pkg-config
+          bash scripts/prepare-sidecars.sh macos-aarch64
 
       - name: Rustfmt Check
         run: cargo fmt --all -- --check

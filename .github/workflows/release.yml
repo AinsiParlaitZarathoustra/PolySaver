@@ -108,12 +108,6 @@ jobs:
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -151,20 +145,6 @@ jobs:
           brew install x264 pkg-config
           npm ci
 
-      - name: Import optional Apple certificate
-        if: env.APPLE_CERTIFICATE != ''
-        run: |
-          set -euo pipefail
-          certificate_path="${RUNNER_TEMP}/polysaver-certificate.p12"
-          keychain_path="${RUNNER_TEMP}/polysaver-signing.keychain-db"
-          printf '%s' "${APPLE_CERTIFICATE}" | base64 -D > "${certificate_path}"
-          security create-keychain -p temporary "${keychain_path}"
-          security set-keychain-settings -lut 21600 "${keychain_path}"
-          security unlock-keychain -p temporary "${keychain_path}"
-          security import "${certificate_path}" -P "${APPLE_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
-          security set-key-partition-list -S apple-tool:,apple: -k temporary "${keychain_path}"
-          security list-keychains -d user -s "${keychain_path}"
-
       - name: Prepare sidecars
         run: bash scripts/prepare-sidecars.sh macos-aarch64
 
@@ -177,7 +157,7 @@ jobs:
 
       - name: Build application, DMG and updater
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_SIGNING_IDENTITY: '-'
         run: npx @tauri-apps/cli build --target "${TARGET}" --bundles dmg,app
 
       - name: Stage verified macOS ARM64 assets

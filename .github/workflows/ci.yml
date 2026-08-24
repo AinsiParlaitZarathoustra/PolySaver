@@ -39,6 +39,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.96.0
           components: rustfmt, clippy
 
       - name: Cache native sidecars
@@ -66,8 +67,10 @@ jobs:
       - name: Cargo Tree Check
         run: cargo tree --workspace
 
-      - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Cargo Deny
+        run: |
+          brew install cargo-deny
+          cargo deny check
 
   frontend-checks:
     name: Frontend Quality & Unit Tests

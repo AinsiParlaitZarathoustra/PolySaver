@@ -1,4 +1,4 @@
-name: Release Multi-Platform Atomic
+name: Release
 
 on:
   push:
@@ -7,545 +7,589 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version without v prefix (e.g. 0.1.0)'
-        required: false
+        description: 'Version to publish, without the v prefix (for example 0.1.0)'
+        required: true
         type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: polysaver-release
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
-  validate-version:
-    name: Validate Version & Environment
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+  validate:
+    name: Validate release
+    runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.get_version.outputs.version }}
-      tag: ${{ steps.get_version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Extract & Validate Version
-        id: get_version
+      - name: Resolve and validate version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
-            RAW_VER="${{ inputs.version }}"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            raw_version="${INPUT_VERSION}"
           else
-            RAW_VER="${GITHUB_REF_NAME#v}"
+            raw_version="${REF_NAME#v}"
           fi
 
-          echo "Extracted version: ${RAW_VER}"
-          if [[ ! "${RAW_VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
-            echo "[ERROR] Version '${RAW_VER}' is not a valid SemVer format (e.g. 0.1.0)!"
+          if [[ ! "${raw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid SemVer release version: ${raw_version}"
             exit 1
           fi
 
-          TAG="v${RAW_VER}"
-          echo "version=${RAW_VER}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${raw_version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${raw_version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify consistency across project files
+      - name: Verify project version consistency
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.get_version.outputs.version }}"
+          tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          package_version="$(node -p "require('./package.json').version")"
+          cargo_version="$(awk '
+            /^\[workspace\.package\]$/ { in_workspace = 1; next }
+            /^\[/ { in_workspace = 0 }
+            in_workspace && /^version = / {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
 
-          # 1. src-tauri/tauri.conf.json
-          TAURI_VER="$(node -e "console.log(require('./src-tauri/tauri.conf.json').version);")"
-          if [ "${TAURI_VER}" != "${VERSION}" ]; then
-            echo "[ERROR] Version in src-tauri/tauri.conf.json (${TAURI_VER}) != ${VERSION}"
+          for actual in "${tauri_version}" "${package_version}" "${cargo_version}"; do
+            if [ "${actual}" != "${RELEASE_VERSION}" ]; then
+              echo "::error::Project version ${actual} does not match release ${RELEASE_VERSION}"
+              exit 1
+            fi
+          done
+
+      - name: Verify updater signing secret exists
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not configured"
             exit 1
           fi
 
-          # 2. package.json
-          PKG_VER="$(node -e "console.log(require('./package.json').version);")"
-          if [ "${PKG_VER}" != "${VERSION}" ]; then
-            echo "[ERROR] Version in package.json (${PKG_VER}) != ${VERSION}"
+      - name: Refuse an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::Release ${RELEASE_TAG} already exists"
             exit 1
           fi
 
-          # 3. Cargo.toml workspace version
-          CARGO_VER="$(grep -A 5 '\[workspace\.package\]' Cargo.toml | grep -m 1 '^version =' | cut -d '"' -f 2)"
-          if [ "${CARGO_VER}" != "${VERSION}" ]; then
-            echo "[ERROR] Version in Cargo.toml (${CARGO_VER}) != ${VERSION}"
-            exit 1
-          fi
-
-          echo "[OK] All project files consistent at version ${VERSION}."
-
-  build-macos-arm64:
-    name: Build macOS (Apple Silicon aarch64)
-    needs: [validate-version]
-    runs-on: macos-latest
+  macos-arm64:
+    name: macOS Apple Silicon
+    needs: validate
+    runs-on: macos-15
+    timeout-minutes: 180
     permissions:
       contents: read
+    env:
+      TARGET: aarch64-apple-darwin
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Verify native runner
+        run: test "$(uname -m)" = "arm64"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
+          cache: npm
 
-      - name: Setup Rust Toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
 
-      - name: Install Node Dependencies
-        run: npm ci
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-aarch64-apple-darwin
 
-      - name: Provision macOS Sidecars (ARM64)
-        run: bash scripts/prepare-sidecars.sh macos-aarch64
+      - name: Install dependencies
+        run: |
+          brew install lame x264 pkg-config
+          npm ci
 
-      - name: Build Tauri macOS ARM64 Bundle & Updater Artifacts
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx @tauri-apps/cli build --target aarch64-apple-darwin --bundles dmg,app
-
-      - name: Verify macOS ARM64 Bundle
+      - name: Import optional Apple certificate
+        if: env.APPLE_CERTIFICATE != ''
         run: |
           set -euo pipefail
-          DMG_PATH="$(find target/aarch64-apple-darwin/release/bundle/dmg target/release/bundle/dmg -name '*.dmg' 2>/dev/null | head -n 1 || true)"
-          if [ -z "${DMG_PATH}" ] || [ ! -s "${DMG_PATH}" ]; then
-            echo "[ERROR] No valid macOS ARM64 DMG bundle found!"
-            exit 1
-          fi
-          hdiutil verify "${DMG_PATH}"
-          echo "[OK] Verified macOS ARM64 DMG."
+          certificate_path="${RUNNER_TEMP}/polysaver-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/polysaver-signing.keychain-db"
+          printf '%s' "${APPLE_CERTIFICATE}" | base64 -D > "${certificate_path}"
+          security create-keychain -p temporary "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p temporary "${keychain_path}"
+          security import "${certificate_path}" -P "${APPLE_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
+          security set-key-partition-list -S apple-tool:,apple: -k temporary "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
 
-      - name: Upload macOS ARM64 Artifacts
+      - name: Prepare sidecars
+        run: bash scripts/prepare-sidecars.sh macos-aarch64
+
+      - name: Verify sidecar architecture
+        run: |
+          set -euo pipefail
+          for binary in yt-dlp ffmpeg ffprobe; do
+            lipo -archs "src-tauri/resources/bin/${binary}" | grep -qw arm64
+          done
+
+      - name: Build application, DMG and updater
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+        run: npx @tauri-apps/cli build --target "${TARGET}" --bundles dmg,app
+
+      - name: Stage verified macOS ARM64 assets
+        run: |
+          set -euo pipefail
+          bundle_root="target/${TARGET}/release/bundle"
+          app_path="$(find "${bundle_root}/macos" -maxdepth 1 -type d -name '*.app' | head -n 1)"
+          dmg_path="$(find "${bundle_root}/dmg" -maxdepth 1 -type f -name '*.dmg' | head -n 1)"
+          updater_path="$(find "${bundle_root}/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | head -n 1)"
+          signature_path="${updater_path}.sig"
+
+          for path in "${app_path}" "${dmg_path}" "${updater_path}" "${signature_path}"; do
+            if [ -z "${path}" ] || [ ! -e "${path}" ]; then
+              echo "::error::Missing macOS ARM64 release asset"
+              exit 1
+            fi
+          done
+
+          codesign --verify --deep --strict "${app_path}"
+          hdiutil verify "${dmg_path}"
+
+          mkdir -p release-out
+          cp "${dmg_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_arm64.dmg"
+          cp "${updater_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_arm64.app.tar.gz"
+          cp "${signature_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_arm64.app.tar.gz.sig"
+
+      - name: Upload macOS ARM64 assets
         uses: actions/upload-artifact@v4
         with:
-          name: polysaver-macos-aarch64
-          path: |
-            target/**/bundle/dmg/*.dmg
-            target/**/bundle/updater/*.tar.gz
-            target/**/bundle/updater/*.tar.gz.sig
+          name: release-macos-arm64
+          path: release-out/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
 
-  build-macos-intel:
-    name: Build macOS (Intel x86_64)
-    needs: [validate-version]
-    runs-on: macos-13
+  macos-intel:
+    name: macOS Intel
+    needs: validate
+    runs-on: macos-15-intel
+    timeout-minutes: 180
     permissions:
       contents: read
+    env:
+      TARGET: x86_64-apple-darwin
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Verify native runner
+        run: test "$(uname -m)" = "x86_64"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
+          cache: npm
 
-      - name: Setup Rust Toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
 
-      - name: Install Node Dependencies
-        run: npm ci
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-x86_64-apple-darwin
 
-      - name: Provision macOS Sidecars (x86_64)
-        run: bash scripts/prepare-sidecars.sh macos-x86_64
+      - name: Install dependencies
+        run: |
+          brew install lame x264 pkg-config
+          npm ci
 
-      - name: Build Tauri macOS Intel Bundle & Updater Artifacts
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx @tauri-apps/cli build --target x86_64-apple-darwin --bundles dmg,app
-
-      - name: Verify macOS Intel Bundle
+      - name: Import optional Apple certificate
+        if: env.APPLE_CERTIFICATE != ''
         run: |
           set -euo pipefail
-          DMG_PATH="$(find target/x86_64-apple-darwin/release/bundle/dmg target/release/bundle/dmg -name '*.dmg' 2>/dev/null | head -n 1 || true)"
-          if [ -z "${DMG_PATH}" ] || [ ! -s "${DMG_PATH}" ]; then
-            echo "[ERROR] No valid macOS Intel DMG bundle found!"
-            exit 1
-          fi
-          hdiutil verify "${DMG_PATH}"
-          echo "[OK] Verified macOS Intel DMG."
+          certificate_path="${RUNNER_TEMP}/polysaver-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/polysaver-signing.keychain-db"
+          printf '%s' "${APPLE_CERTIFICATE}" | base64 -D > "${certificate_path}"
+          security create-keychain -p temporary "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p temporary "${keychain_path}"
+          security import "${certificate_path}" -P "${APPLE_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
+          security set-key-partition-list -S apple-tool:,apple: -k temporary "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
 
-      - name: Upload macOS Intel Artifacts
+      - name: Prepare sidecars
+        run: bash scripts/prepare-sidecars.sh macos-x86_64
+
+      - name: Verify sidecar architecture
+        run: |
+          set -euo pipefail
+          for binary in yt-dlp ffmpeg ffprobe; do
+            lipo -archs "src-tauri/resources/bin/${binary}" | grep -qw x86_64
+          done
+
+      - name: Build application, DMG and updater
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+        run: npx @tauri-apps/cli build --target "${TARGET}" --bundles dmg,app
+
+      - name: Stage verified macOS Intel assets
+        run: |
+          set -euo pipefail
+          bundle_root="target/${TARGET}/release/bundle"
+          app_path="$(find "${bundle_root}/macos" -maxdepth 1 -type d -name '*.app' | head -n 1)"
+          dmg_path="$(find "${bundle_root}/dmg" -maxdepth 1 -type f -name '*.dmg' | head -n 1)"
+          updater_path="$(find "${bundle_root}/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | head -n 1)"
+          signature_path="${updater_path}.sig"
+
+          for path in "${app_path}" "${dmg_path}" "${updater_path}" "${signature_path}"; do
+            if [ -z "${path}" ] || [ ! -e "${path}" ]; then
+              echo "::error::Missing macOS Intel release asset"
+              exit 1
+            fi
+          done
+
+          codesign --verify --deep --strict "${app_path}"
+          hdiutil verify "${dmg_path}"
+
+          mkdir -p release-out
+          cp "${dmg_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_x64.dmg"
+          cp "${updater_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_x64.app.tar.gz"
+          cp "${signature_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_x64.app.tar.gz.sig"
+
+      - name: Upload macOS Intel assets
         uses: actions/upload-artifact@v4
         with:
-          name: polysaver-macos-x86_64
-          path: |
-            target/**/bundle/dmg/*.dmg
-            target/**/bundle/updater/*.tar.gz
-            target/**/bundle/updater/*.tar.gz.sig
+          name: release-macos-intel
+          path: release-out/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
 
-  build-windows:
-    name: Build Windows (x64)
-    needs: [validate-version]
-    runs-on: windows-latest
+  windows:
+    name: Windows x64
+    needs: validate
+    runs-on: windows-2025
+    timeout-minutes: 120
     permissions:
       contents: read
     defaults:
       run:
         shell: bash
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
+          cache: npm
 
-      - name: Setup Rust Toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Install Node Dependencies
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-x86_64-pc-windows-msvc
+
+      - name: Install dependencies
         run: npm ci
 
-      - name: Provision Windows Sidecars
+      - name: Prepare sidecars
         run: bash scripts/prepare-sidecars.sh windows-x64
 
-      - name: Build Tauri Windows Release Bundle & Updater Artifacts
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx @tauri-apps/cli build --target x86_64-pc-windows-msvc --bundles nsis,msi
-
-      - name: Verify Windows Installer
+      - name: Verify sidecars
         run: |
           set -euo pipefail
-          EXE_PATH="$(find target/release/bundle target/x86_64-pc-windows-msvc/release/bundle -name '*.exe' 2>/dev/null | head -n 1 || true)"
-          if [ -z "${EXE_PATH}" ] || [ ! -s "${EXE_PATH}" ]; then
-            echo "[ERROR] No valid Windows .exe installer found!"
-            exit 1
-          fi
-          echo "[OK] Verified Windows NSIS installer: ${EXE_PATH}"
+          for binary in yt-dlp.exe ffmpeg.exe ffprobe.exe; do
+            test "$(head -c 2 "src-tauri/resources/bin/${binary}")" = "MZ"
+          done
 
-      - name: Upload Windows Artifacts
+      - name: Build EXE, MSI and updater signatures
+        run: npx @tauri-apps/cli build --target "${TARGET}" --bundles nsis,msi
+
+      - name: Stage verified Windows assets
+        run: |
+          set -euo pipefail
+          bundle_root="target/${TARGET}/release/bundle"
+          exe_path="$(find "${bundle_root}/nsis" -maxdepth 1 -type f -name '*.exe' | head -n 1)"
+          msi_path="$(find "${bundle_root}/msi" -maxdepth 1 -type f -name '*.msi' | head -n 1)"
+
+          for path in "${exe_path}" "${exe_path}.sig" "${msi_path}" "${msi_path}.sig"; do
+            if [ -z "${path}" ] || [ ! -s "${path}" ]; then
+              echo "::error::Missing Windows release asset: ${path}"
+              exit 1
+            fi
+          done
+
+          mkdir -p release-out
+          cp "${exe_path}" "release-out/PolySaver_${RELEASE_VERSION}_Windows_x64_Setup.exe"
+          cp "${exe_path}.sig" "release-out/PolySaver_${RELEASE_VERSION}_Windows_x64_Setup.exe.sig"
+          cp "${msi_path}" "release-out/PolySaver_${RELEASE_VERSION}_Windows_x64.msi"
+          cp "${msi_path}.sig" "release-out/PolySaver_${RELEASE_VERSION}_Windows_x64.msi.sig"
+
+      - name: Upload Windows assets
         uses: actions/upload-artifact@v4
         with:
-          name: polysaver-windows-x64
-          path: |
-            target/**/bundle/nsis/*.exe
-            target/**/bundle/msi/*.msi
-            target/**/bundle/updater/*.zip
-            target/**/bundle/updater/*.zip.sig
-            target/**/bundle/updater/*.nsis.zip
-            target/**/bundle/updater/*.nsis.zip.sig
+          name: release-windows-x64
+          path: release-out/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
 
-  build-linux:
-    name: Build Linux (x64)
-    needs: [validate-version]
+  linux:
+    name: Linux x64
+    needs: validate
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
     permissions:
       contents: read
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install Linux System Dependencies
+      - name: Install Linux system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            file \
             libappindicator3-dev \
             librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
             patchelf \
+            wget \
             xdg-utils
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
+          cache: npm
 
-      - name: Setup Rust Toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Install Node Dependencies
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-x86_64-unknown-linux-gnu
+
+      - name: Install dependencies
         run: npm ci
 
-      - name: Provision Linux Sidecars
+      - name: Prepare sidecars
         run: bash scripts/prepare-sidecars.sh linux-x64
 
-      - name: Build Tauri Linux Release Bundle & Updater Artifacts
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx @tauri-apps/cli build --target x86_64-unknown-linux-gnu --bundles appimage,deb
-
-      - name: Verify Linux Packages
+      - name: Verify sidecar architecture
         run: |
           set -euo pipefail
-          APPIMAGE="$(find target/**/bundle/appimage -name '*.AppImage' 2>/dev/null | head -n 1 || true)"
-          DEB="$(find target/**/bundle/deb -name '*.deb' 2>/dev/null | head -n 1 || true)"
-          if [ -z "${APPIMAGE}" ] || [ ! -s "${APPIMAGE}" ]; then
-            echo "[ERROR] Missing Linux AppImage!"
-            exit 1
-          fi
-          if [ -z "${DEB}" ] || [ ! -s "${DEB}" ]; then
-            echo "[ERROR] Missing Linux DEB!"
-            exit 1
-          fi
-          echo "[OK] Verified Linux AppImage and DEB."
+          for binary in yt-dlp ffmpeg ffprobe; do
+            file "src-tauri/resources/bin/${binary}" | grep -q 'x86-64'
+          done
 
-      - name: Upload Linux Artifacts
+      - name: Build AppImage, DEB and updater signature
+        run: npx @tauri-apps/cli build --target "${TARGET}" --bundles appimage,deb
+
+      - name: Stage verified Linux assets
+        run: |
+          set -euo pipefail
+          bundle_root="target/${TARGET}/release/bundle"
+          appimage_path="$(find "${bundle_root}/appimage" -maxdepth 1 -type f -name '*.AppImage' | head -n 1)"
+          deb_path="$(find "${bundle_root}/deb" -maxdepth 1 -type f -name '*.deb' | head -n 1)"
+
+          for path in "${appimage_path}" "${appimage_path}.sig" "${deb_path}"; do
+            if [ -z "${path}" ] || [ ! -s "${path}" ]; then
+              echo "::error::Missing Linux release asset: ${path}"
+              exit 1
+            fi
+          done
+
+          mkdir -p release-out
+          cp "${appimage_path}" "release-out/PolySaver_${RELEASE_VERSION}_Linux_x64.AppImage"
+          cp "${appimage_path}.sig" "release-out/PolySaver_${RELEASE_VERSION}_Linux_x64.AppImage.sig"
+          cp "${deb_path}" "release-out/PolySaver_${RELEASE_VERSION}_Linux_x64.deb"
+
+      - name: Upload Linux assets
         uses: actions/upload-artifact@v4
         with:
-          name: polysaver-linux-x64
-          path: |
-            target/**/bundle/appimage/*.AppImage
-            target/**/bundle/deb/*.deb
-            target/**/bundle/updater/*.tar.gz
-            target/**/bundle/updater/*.tar.gz.sig
-            target/**/bundle/updater/*.AppImage.tar.gz
-            target/**/bundle/updater/*.AppImage.tar.gz.sig
+          name: release-linux-x64
+          path: release-out/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
 
-  publish-release:
-    name: Publish Atomic Multi-Platform Release
-    runs-on: ubuntu-latest
+  publish:
+    name: Publish complete release
     needs:
-      - validate-version
-      - build-macos-arm64
-      - build-macos-intel
-      - build-windows
-      - build-linux
-    if: always() && needs.validate-version.result == 'success' && needs.build-macos-arm64.result == 'success' && needs.build-macos-intel.result == 'success' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success'
+      - validate
+      - macos-arm64
+      - macos-intel
+      - windows
+      - linux
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup staging area
-        run: mkdir -p release_dist
-
-      - name: Download macOS ARM64 Artifacts
+      - name: Download macOS ARM64 assets
         uses: actions/download-artifact@v4
         with:
-          name: polysaver-macos-aarch64
-          path: release_dist
+          name: release-macos-arm64
+          path: release-input/macos-arm64
 
-      - name: Download macOS Intel Artifacts
+      - name: Download macOS Intel assets
         uses: actions/download-artifact@v4
         with:
-          name: polysaver-macos-x86_64
-          path: release_dist
+          name: release-macos-intel
+          path: release-input/macos-intel
 
-      - name: Download Windows Artifacts
+      - name: Download Windows assets
         uses: actions/download-artifact@v4
         with:
-          name: polysaver-windows-x64
-          path: release_dist
+          name: release-windows-x64
+          path: release-input/windows
 
-      - name: Download Linux Artifacts
+      - name: Download Linux assets
         uses: actions/download-artifact@v4
         with:
-          name: polysaver-linux-x64
-          path: release_dist
+          name: release-linux-x64
+          path: release-input/linux
 
-      - name: Inspect and Verify All 4 Target Bundles
+      - name: Assemble and validate release
         run: |
           set -euo pipefail
-          echo "=== Release Artifacts Inspection ==="
-          ls -la release_dist/
+          mkdir -p release-dist
+          while IFS= read -r -d '' asset; do
+            destination="release-dist/$(basename "${asset}")"
+            if [ -e "${destination}" ]; then
+              echo "::error::Duplicate release asset: $(basename "${asset}")"
+              exit 1
+            fi
+            cp "${asset}" "${destination}"
+          done < <(find release-input -type f -print0)
 
-          # 1. macOS ARM64 DMG
-          MACOS_ARM="$(find release_dist -name '*aarch64*.dmg' -o -name '*arm64*.dmg' | head -n 1 || true)"
-          # 2. macOS Intel DMG
-          MACOS_INTEL="$(find release_dist -name '*x86_64*.dmg' -o -name '*x64*.dmg' | head -n 1 || true)"
-          # 3. Windows Installer
-          WINDOWS_EXE="$(find release_dist -name '*.exe' | head -n 1 || true)"
-          # 4. Linux Packages
-          LINUX_APPIMAGE="$(find release_dist -name '*.AppImage' | head -n 1 || true)"
-          LINUX_DEB="$(find release_dist -name '*.deb' | head -n 1 || true)"
+          node scripts/generate-release-metadata.mjs \
+            release-dist \
+            "${RELEASE_VERSION}" \
+            "${RELEASE_TAG}" \
+            "${GITHUB_REPOSITORY}"
 
-          if [ -z "${MACOS_ARM}" ] || [ -z "${WINDOWS_EXE}" ] || [ -z "${LINUX_APPIMAGE}" ] || [ -z "${LINUX_DEB}" ]; then
-            echo "[ERROR] One or more essential platform packages are missing!"
-            exit 1
-          fi
-
-          echo "[OK] All 4 platforms present."
-
-      - name: Generate Static latest.json Manifest & SHA256SUMS
-        id: manifest
+      - name: Create complete draft release
         run: |
           set -euo pipefail
-          cd release_dist
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          cat > "${notes_path}" <<EOF
+          ## PolySaver ${RELEASE_VERSION}
 
-          VERSION="${{ needs.validate-version.outputs.version }}"
-          TAG="${{ needs.validate-version.outputs.tag }}"
-          PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          REPO="${{ github.repository }}"
-          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+          Téléchargez uniquement le fichier correspondant à votre système :
 
-          echo "Generating SHA256SUMS.txt..."
-          sha256sum * > SHA256SUMS.txt
+          - macOS Apple Silicon : PolySaver_${RELEASE_VERSION}_macOS_arm64.dmg
+          - macOS Intel : PolySaver_${RELEASE_VERSION}_macOS_x64.dmg
+          - Windows : PolySaver_${RELEASE_VERSION}_Windows_x64_Setup.exe
+          - Windows administré : PolySaver_${RELEASE_VERSION}_Windows_x64.msi
+          - Linux universel : PolySaver_${RELEASE_VERSION}_Linux_x64.AppImage
+          - Ubuntu, Debian et Mint : PolySaver_${RELEASE_VERSION}_Linux_x64.deb
 
-          echo "Generating unified latest.json updater manifest..."
-          node -e "
-          const fs = require('fs');
-          const path = require('path');
+          Les autres fichiers servent aux mises à jour automatiques et à la vérification d’intégrité.
+          EOF
 
-          const version = '${VERSION}';
-          const pubDate = '${PUB_DATE}';
-          const baseUrl = '${BASE_URL}';
-
-          function readSig(pattern) {
-            const files = fs.readdirSync('.').filter(f => f.endsWith('.sig') && f.includes(pattern));
-            if (files.length > 0) {
-              return fs.readFileSync(files[0], 'utf-8').trim();
-            }
-            return '';
-          }
-
-          function findAsset(pattern, ext) {
-            const files = fs.readdirSync('.').filter(f => f.includes(pattern) && f.endsWith(ext) && !f.endsWith('.sig'));
-            return files.length > 0 ? files[0] : '';
-          }
-
-          const darwinAarch64Asset = findAsset('aarch64', '.tar.gz') || findAsset('arm64', '.tar.gz') || findAsset('aarch64', '.dmg');
-          const darwinAarch64Sig = readSig('aarch64') || readSig('arm64');
-
-          const darwinX86Asset = findAsset('x86_64', '.tar.gz') || findAsset('x64', '.tar.gz') || findAsset('x86_64', '.dmg');
-          const darwinX86Sig = readSig('x86_64') || readSig('x64');
-
-          const windowsAsset = findAsset('x64', '.zip') || findAsset('x86_64', '.zip') || findAsset('setup', '.exe');
-          const windowsSig = readSig('win') || readSig('nsis') || readSig('x64');
-
-          const linuxAsset = findAsset('linux', '.tar.gz') || findAsset('amd64', '.AppImage.tar.gz') || findAsset('amd64', '.AppImage');
-          const linuxSig = readSig('linux') || readSig('AppImage') || readSig('amd64');
-
-          const manifest = {
-            version: version,
-            notes: 'PolySaver ' + version + ' release',
-            pub_date: pubDate,
-            platforms: {
-              'darwin-aarch64': {
-                signature: darwinAarch64Sig,
-                url: baseUrl + '/' + darwinAarch64Asset
-              },
-              'darwin-x86_64': {
-                signature: darwinX86Sig,
-                url: baseUrl + '/' + darwinX86Asset
-              },
-              'windows-x86_64': {
-                signature: windowsSig,
-                url: baseUrl + '/' + windowsAsset
-              },
-              'linux-x86_64': {
-                signature: linuxSig,
-                url: baseUrl + '/' + linuxAsset
-              }
-            }
-          };
-
-          fs.writeFileSync('latest.json', JSON.stringify(manifest, null, 2));
-          console.log('Generated latest.json:');
-          console.log(JSON.stringify(manifest, null, 2));
-          "
-
-          cd ..
-
-      - name: Create Draft GitHub Release
-        id: create_draft
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="${{ needs.validate-version.outputs.tag }}"
-          VERSION="${{ needs.validate-version.outputs.version }}"
-
-          RELEASE_NOTES="## PolySaver ${TAG}
-
-          Universal & Sovereign Multimedia Downloader (GPL-3.0).
-
-          ### Engine Specifications
-          - **yt-dlp**: \`2026.08.19\`
-          - **FFmpeg / FFprobe**: \`9.0.1\`
-
-          ### Platform Artifacts
-          - **macOS Apple Silicon**: \`PolySaver_${VERSION}_aarch64.dmg\`
-          - **macOS Intel**: \`PolySaver_${VERSION}_x86_64.dmg\`
-          - **Windows x64**: \`PolySaver_${VERSION}_x64-setup.exe\`
-          - **Linux x64**: \`polysaver_${VERSION}_amd64.AppImage\` & \`polysaver_${VERSION}_amd64.deb\`
-
-          ### Verification & Updater
-          - \`SHA256SUMS.txt\` attached for package verification.
-          - \`latest.json\` attached for automatic updates."
-
-          gh release create "${TAG}" \
-            --title "PolySaver ${TAG}" \
-            --notes "${RELEASE_NOTES}" \
-            --target "${{ github.sha }}" \
+          gh release create "${RELEASE_TAG}" \
+            --title "PolySaver ${RELEASE_VERSION}" \
+            --notes-file "${notes_path}" \
+            --target "${GITHUB_SHA}" \
             --draft \
-            release_dist/*
+            release-dist/*
 
-          echo "[OK] Draft release created successfully."
+          touch "${RUNNER_TEMP}/polysaver-release-created"
 
-      - name: Verify Attached Assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify assets stored by GitHub
         run: |
           set -euo pipefail
-          TAG="${{ needs.validate-version.outputs.tag }}"
-          ASSETS="$(gh release view "${TAG}" --json assets -q '.assets[].name')"
-          echo "Attached assets for ${TAG}:"
-          echo "${ASSETS}"
+          find release-dist -maxdepth 1 -type f -exec basename {} \; | sort > expected-assets.txt
+          gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | sort > github-assets.txt
+          diff -u expected-assets.txt github-assets.txt
 
-          echo "${ASSETS}" | grep -q "\.dmg" || (echo "[ERROR] Missing DMG!" && exit 1)
-          echo "${ASSETS}" | grep -q "\.exe" || (echo "[ERROR] Missing EXE!" && exit 1)
-          echo "${ASSETS}" | grep -q "\.AppImage" || (echo "[ERROR] Missing AppImage!" && exit 1)
-          echo "${ASSETS}" | grep -q "\.deb" || (echo "[ERROR] Missing DEB!" && exit 1)
-          echo "${ASSETS}" | grep -q "SHA256SUMS.txt" || (echo "[ERROR] Missing SHA256SUMS.txt!" && exit 1)
-          echo "${ASSETS}" | grep -q "latest.json" || (echo "[ERROR] Missing latest.json!" && exit 1)
+          mkdir -p downloaded-metadata
+          gh release download "${RELEASE_TAG}" \
+            --pattern latest.json \
+            --pattern SHA256SUMS.txt \
+            --dir downloaded-metadata
+          cmp release-dist/latest.json downloaded-metadata/latest.json
+          cmp release-dist/SHA256SUMS.txt downloaded-metadata/SHA256SUMS.txt
 
-          echo "[OK] All required assets verified on GitHub Release."
+      - name: Publish release
+        run: gh release edit "${RELEASE_TAG}" --draft=false --latest
 
-      - name: Publish Release Atomically
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="${{ needs.validate-version.outputs.tag }}"
-          echo "Publishing release ${TAG}..."
-          gh release edit "${TAG}" --draft=false
-          echo "[SUCCESS] Multi-platform release ${TAG} published atomically."
-
-      - name: Cleanup on Failure
+      - name: Remove incomplete draft after a failure
         if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.validate-version.outputs.tag }}"
-          echo "[CLEANUP] Build or validation failed. Deleting draft release and tag ${TAG}..."
-          gh release delete "${TAG}" --yes --cleanup-tag 2>/dev/null || true
+          if [ -f "${RUNNER_TEMP}/polysaver-release-created" ]; then
+            gh release delete "${RELEASE_TAG}" --yes >/dev/null 2>&1 || true
+          fi

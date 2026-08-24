@@ -263,7 +263,7 @@ echo "========================================="
 echo "[SUCCESS] Sidecars provisioned for ${PLATFORM}."
 
 # If executing on native runner, verify versions
-if [ "${PLATFORM}" = "macos-aarch64" ] && [ "$(uname -s)" = "Darwin" ]; then
+if [[ "${PLATFORM}" =~ ^macos-(aarch64|x86_64)$ ]] && [ "$(uname -s)" = "Darwin" ]; then
     echo "Running native verification:"
     "${YTDLP_TARGET}" --version
     "${FFMPEG_TARGET}" -version | head -n 1

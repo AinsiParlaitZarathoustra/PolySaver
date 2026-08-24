@@ -21,7 +21,7 @@ Téléchargeur vidéo et audio  sans publicité ni abonnement et **rapide 🚀**
 
 ## Pourquoi PolySaver
 
-Les téléchargeurs vidéo du marché veulent vous vendre un abonnement pour des fonctions de base, affichent de la publicité, ou vous imposent des limites de téléchargement pour vous forcer à payer 💰. PolySaver fait la même chose en (beaucoup) mieux : une app de quelques mégaoctets, écrite en Rust ⚡️🔒, qui ne demande rien et ne renvoie rien et vous permet de télécharger sur votre ordinateur sans limite aucune les contenus de votre choix — sur PC, Mac et Linux.
+Les téléchargeurs vidéo du marché veulent vous vendre un abonnement pour des fonctions de base, affichent de la publicité, ou vous imposent des limites de téléchargement pour vous forcer à payer 💰. PolySaver fait la même chose en (beaucoup) mieux : une app de quelques mégaoctets, écrite en Rust ⚡️🔒, qui ne demande rien, ne renvoie rien et vous permet de télécharger sur votre ordinateur sans limite aucune les contenus de votre choix — sur PC, Mac et Linux.
 
 ## Fonctionnalités
 

@@ -35,7 +35,7 @@ Les téléchargeurs vidéo du marché veulent vous vendre un abonnement pour des
 
 | Vidéo | Audio |
 |---|---|
-| MP4 | MP3, FLAC, WAV |
+| MP4 | MP3, FLAC |
 | Sélection de la résolution | Débit configurable (128 / 192 / 320 kbps) |
 
 ### Sources

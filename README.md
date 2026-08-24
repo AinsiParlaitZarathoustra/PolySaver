@@ -50,4 +50,4 @@ YouTube, Vimeo, X, TikTok, Instagram, Twitch, Dailymotion, Arte, France TV, Band
 
 ## Licence
 
-PolySaver est distribué sous licence **GPL 3.0**. Voir le fichier [LICENSE](./LICENSE) pour le texte complet.
+PolySaver est, bien malgré moi, distribué sous licence **GPL 3.0**. Voir le fichier [LICENSE](./LICENSE) pour le texte complet.Je ferai de yt-dlp un module non intégré à mon logiciel dans les prochaines version pour pouvoir en faire un Apache 2.0.

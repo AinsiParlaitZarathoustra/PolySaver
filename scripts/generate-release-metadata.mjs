@@ -28,14 +28,37 @@ const MINISIGN_MIN_PAYLOAD_LENGTH = 64;
 /**
  * Validates that a `.sig` file contains a structurally valid minisign signature.
  *
- * Tauri signs artifacts with minisign and writes `<artifact>.sig`. The format is
- * two lines: an `untrusted comment: ...` line and a base64 payload that decodes
- * to a signature whose first two bytes are a signature algorithm ("Ed") followed
- * by a key id. Checking this catches a truncated or placeholder signature before
- * it is published — which would silently break the updater for every user.
+ * Tauri writes `<artifact>.sig` as the BASE64 ENCODING of a minisign signature
+ * box, so the file is a single line whose decoded form holds the box: an
+ * `untrusted comment: ...` line followed by a base64 payload that decodes to a
+ * signature whose first two bytes are the algorithm identifier "Ed". The raw
+ * (non-encoded) box is accepted as well, since some tooling writes it that way.
+ * Checking this catches an empty, truncated or placeholder signature before it
+ * is published — a single malformed signature makes the updater reject the whole
+ * manifest, which would silently break updates for every user.
  */
 function validateMinisignSignature(signatureText, fileName) {
-  const lines = signatureText
+  const trimmed = signatureText.trim();
+
+  if (trimmed.length === 0) {
+    throw new Error('Signature file ' + fileName + ' is empty');
+  }
+
+  // Tauri stores base64(box); accept a raw box as well.
+  let box = trimmed;
+  if (!box.startsWith('untrusted comment:')) {
+    const outer = Buffer.from(trimmed, 'base64');
+    if (outer.toString('base64').replace(/=+$/, '') !== trimmed.replace(/=+$/, '')) {
+      throw new Error(
+        'Signature file ' +
+          fileName +
+          ' is neither a minisign box nor valid base64 of one',
+      );
+    }
+    box = outer.toString('utf8');
+  }
+
+  const lines = box
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
@@ -75,8 +98,12 @@ function validateMinisignSignature(signatureText, fileName) {
     );
   }
 
-  // minisign signatures start with the algorithm identifier "Ed".
-  if (decoded[0] !== 0x45 || decoded[1] !== 0x64) {
+  // minisign signature boxes start with an algorithm identifier that is either
+  // "Ed" (0x45 0x64, legacy pure EdDSA) or "ED" (0x45 0x44, EdDSA pre-hashed
+  // with BLAKE2b-512). Tauri's CLI signs files with the pre-hashed variant, so
+  // both must be accepted — checking only "Ed" rejected every real signature.
+  const isEd = decoded[0] === 0x45 && (decoded[1] === 0x64 || decoded[1] === 0x44);
+  if (!isEd) {
     throw new Error('Signature file ' + fileName + ' does not contain an minisign signature');
   }
 }
@@ -185,14 +212,29 @@ function generateReleaseMetadata(releaseDirectoryArg, version, tag, repository) 
   console.log(finalAssetNames.join('\n'));
 }
 
-/** Builds a syntactically valid minisign signature for the fixtures. */
+/**
+ * Builds a `.sig` file in the exact shape Tauri writes: the base64 encoding of a
+ * complete minisign signature box whose payload is "ED" + 8-byte key id +
+ * 64-byte signature. Earlier fixtures emitted raw box text with an "Ed" prefix,
+ * which is why the self-test kept passing while every real signature was
+ * rejected — the fixture must mirror the production format.
+ */
 function fakeMinisignSignature(label) {
-  // "Ed" prefix followed by a key id and signature bytes, as minisign emits.
   const payload = Buffer.concat([
-    Buffer.from('Ed', 'ascii'),
-    Buffer.alloc(MINISIGN_MIN_PAYLOAD_LENGTH, 0x42),
+    Buffer.from('ED', 'ascii'),
+    Buffer.alloc(8, 0x41),
+    Buffer.alloc(64, 0x42),
   ]);
-  return 'untrusted comment: ' + label + '\n' + payload.toString('base64') + '\n';
+  const box =
+    'untrusted comment: ' +
+    label +
+    '\n' +
+    payload.toString('base64') +
+    '\n' +
+    'trusted comment: timestamp:0\tfile:fixture\n' +
+    Buffer.alloc(64, 0x43).toString('base64') +
+    '\n';
+  return Buffer.from(box, 'utf8').toString('base64');
 }
 
 /**
@@ -239,7 +281,10 @@ function selfTest() {
       if (!platform || typeof platform.signature !== 'string' || !platform.url) {
         throw new Error('Self-test manifest is missing platform entry: ' + key);
       }
-      if (!platform.signature.startsWith('untrusted comment:')) {
+      // latest.json carries the .sig file content verbatim, and Tauri writes it
+      // as base64(box), so the decoded form must be a minisign box.
+      const decodedSignature = Buffer.from(platform.signature, 'base64').toString('utf8');
+      if (!decodedSignature.startsWith('untrusted comment:')) {
         throw new Error('Self-test signature for ' + key + ' is not a minisign block');
       }
       if (!platform.url.startsWith('https://github.com/' + repository + '/releases/download/')) {

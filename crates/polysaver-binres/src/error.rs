@@ -9,6 +9,10 @@ pub enum BinaryKind {
     YtDlp,
     Ffmpeg,
     Ffprobe,
+    /// Node.js: JavaScript runtime required by yt-dlp for YouTube challenges.
+    Node,
+    /// Deno: preferred JavaScript runtime (yt-dlp enables it by default).
+    Deno,
 }
 
 impl BinaryKind {
@@ -19,6 +23,8 @@ impl BinaryKind {
             Self::YtDlp => "yt-dlp",
             Self::Ffmpeg => "ffmpeg",
             Self::Ffprobe => "ffprobe",
+            Self::Node => "node",
+            Self::Deno => "deno",
         }
     }
 
@@ -26,9 +32,18 @@ impl BinaryKind {
     #[must_use]
     pub const fn version_flag(self) -> &'static str {
         match self {
-            Self::YtDlp => "--version",
+            Self::YtDlp | Self::Node | Self::Deno => "--version",
             Self::Ffmpeg | Self::Ffprobe => "-version",
         }
+    }
+
+    /// Whether this kind is resolved from the app-managed directory first.
+    ///
+    /// `YtDlp`, `Node` and `Deno` can be installed/updated at runtime into
+    /// `app_data/bin`, so that copy must win over any bundled resource.
+    #[must_use]
+    pub const fn prefers_app_bin_dir(self) -> bool {
+        matches!(self, Self::YtDlp | Self::Node | Self::Deno)
     }
 }
 
@@ -46,4 +61,11 @@ pub enum BinResError {
 
     #[error("Failed to execute probe for binary '{kind}': {error}")]
     ProbeFailed { kind: BinaryKind, error: String },
+
+    /// The candidate could not be started at all. Distinct from [`Self::ProbeFailed`]
+    /// because a spawn failure can be caused by momentary OS exhaustion
+    /// (`fork: Resource temporarily unavailable`) rather than by the binary itself,
+    /// and is therefore worth a bounded retry.
+    #[error("Failed to spawn binary '{kind}': {error}")]
+    SpawnFailed { kind: BinaryKind, error: String },
 }

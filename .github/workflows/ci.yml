@@ -1,39 +1,111 @@
 name: CI
 
+# Runs on every push and pull request targeting the development branches.
+# The backend matrix compiles and tests on all three supported platforms so a
+# Windows- or Linux-only breakage is caught long before a release.
 on:
   push:
-    branches: [main]
+    branches: [main, v2.5]
   pull_request:
-    branches: [main]
+    branches: [main, v2.5]
+
+# Cancel superseded runs on the same ref to keep the queue short.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  security-scan:
-    name: Gitleaks Security Scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+  lint-and-frontend:
+    name: Lint & frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  backend-checks:
-    name: Rust Backend & Security Checks
-    runs-on: macos-15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: node-version.txt
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Architectural boundaries
+        run: npm run check:boundaries
+
+      - name: ESLint (max-warnings 0)
+        run: npm run lint
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Production build
+        run: npm run build
+
+  backend-matrix:
+    name: Rust ${{ matrix.label }}
+    needs: lint-and-frontend
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    # One failing platform must not hide the results of the other two.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            label: macOS aarch64
+            target: aarch64-apple-darwin
+            sidecar_platform: macos-aarch64
+          - os: windows-2025
+            label: Windows x64
+            target: x86_64-pc-windows-msvc
+            sidecar_platform: windows-x64
+          - os: ubuntu-22.04
+            label: Linux x64
+            target: x86_64-unknown-linux-gnu
+            sidecar_platform: linux-x64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      # tauri-build needs the WebKitGTK stack; without these the crate fails to
+      # compile on Linux before any of our code is even reached.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            file \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget \
+            xdg-utils
+
+      # prepare-sidecars.sh compiles ffmpeg from source on macOS and needs a
+      # static x264 plus pkg-config to do it.
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install x264 pkg-config
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: node-version.txt
           cache: npm
 
       - name: Setup Rust
@@ -41,65 +113,73 @@ jobs:
         with:
           toolchain: 1.96.0
           components: rustfmt, clippy
+          targets: ${{ matrix.target }}
 
-      - name: Cache native sidecars
-        uses: actions/cache@v4
+      # The Cargo workspace root is the repository root, so the default
+      # `workspaces` mapping (. -> target) is correct here.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-${{ matrix.target }}
+
+      # ffmpeg is compiled locally on macOS (dav1d + lame + x264), which is by
+      # far the most expensive step of this job. Caching the two binaries keeps
+      # CI usable; the yt-dlp download is cheap and always re-verified.
+      - name: Cache macOS FFmpeg/FFprobe build
+        if: runner.os == 'macOS'
+        uses: actions/cache@v6
         with:
           path: |
             /tmp/polysaver_macos-aarch64_ffmpeg
             /tmp/polysaver_macos-aarch64_ffprobe
-          key: polysaver-sidecars-macos-aarch64-ffmpeg-9.0.1-lame-3.100
+          key: polysaver-ffmpeg-9.0.1-lame-3.100-x264-macos-aarch64
 
-      - name: Prepare native sidecars
-        run: |
-          brew install x264 pkg-config
-          bash scripts/prepare-sidecars.sh macos-aarch64
-
-      - name: Rustfmt Check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy Linter
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Cargo Test
-        run: cargo test --workspace --all-features
-
-      - name: Cargo Tree Check
-        run: cargo tree --workspace
-
-      - name: Cargo Deny
-        run: |
-          brew install cargo-deny
-          cargo deny check
-
-  frontend-checks:
-    name: Frontend Quality & Unit Tests
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-
-      - name: Install Dependencies
+      - name: Install npm dependencies
         run: npm ci
 
-      - name: Architectural Boundaries Check
-        run: npm run check:boundaries
+      # Mandatory before any cargo command: tauri.conf.json declares
+      # `resources/bin/*` and tauri-build fails with GlobPathNotFound when the
+      # glob matches nothing. src-tauri/resources/bin/ is gitignored, so every
+      # job must provision it. The output directory is intentionally NOT cached:
+      # prepare-sidecars.sh wipes it on every run, so a restored cache would be
+      # deleted anyway (see the sprint 4 report for the rationale).
+      - name: Prepare native sidecars
+        run: bash scripts/prepare-sidecars.sh ${{ matrix.sidecar_platform }}
 
-      - name: ESLint
-        run: npm run lint
+      - name: Verify sidecar binaries exist
+        run: |
+          set -euo pipefail
+          for binary in yt-dlp ffmpeg ffprobe; do
+            path="src-tauri/resources/bin/${binary}"
+            if [ ! -f "${path}" ] && [ ! -f "${path}.exe" ]; then
+              echo "::error::Missing provisioned sidecar: ${binary}"
+              exit 1
+            fi
+          done
 
-      - name: TypeScript Typecheck
-        run: npm run typecheck
+      - name: Rustfmt check
+        run: cargo fmt --all -- --check
 
-      - name: Vitest Unit Tests
-        run: npm run test -- --run
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Vite Build
-        run: npm run build
+      - name: Cargo tests
+        run: cargo test --workspace --all-features
+
+  security:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout source (full history for the scanner)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

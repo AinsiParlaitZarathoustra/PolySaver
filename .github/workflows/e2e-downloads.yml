@@ -1,34 +1,70 @@
 name: Network E2E Downloads Matrix
 
+# Weekly real-download smoke test. It exercises the full pipeline against live
+# sites, so it is scheduled rather than run on every push.
+#
+# Sidecars are provisioned before any cargo command: tauri-build fails with
+# GlobPathNotFound when `resources/bin/*` matches nothing, and that directory is
+# gitignored — this was the reason this workflow could never pass before.
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 4 * * 1' # Weekly run on Monday at 04:00 UTC
+    - cron: '0 4 * * 1' # Every Monday at 04:00 UTC
+
+permissions:
+  contents: read
 
 jobs:
   e2e-matrix:
-    name: Real Network E2E Matrix (macOS ARM64)
-    runs-on: macos-14
-    timeout-minutes: 30
-
+    name: Real network E2E (macOS ARM64)
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Checkout source
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version-file: node-version.txt
           cache: npm
 
-      - name: Install dependencies
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-aarch64-apple-darwin
+
+      # ffmpeg is compiled from source on macOS; caching the two binaries keeps
+      # this weekly job affordable.
+      - name: Cache macOS FFmpeg/FFprobe build
+        uses: actions/cache@v6
+        with:
+          path: |
+            /tmp/polysaver_macos-aarch64_ffmpeg
+            /tmp/polysaver_macos-aarch64_ffprobe
+          key: polysaver-ffmpeg-9.0.1-lame-3.100-x264-macos-aarch64
+
+      - name: Install macOS build dependencies
+        run: brew install x264 pkg-config
+
+      - name: Install npm dependencies
         run: npm ci
 
-      - name: Run Real Network E2E Test Suite
+      - name: Prepare native sidecars
+        run: bash scripts/prepare-sidecars.sh macos-aarch64
+
+      - name: Run real network E2E suite
         env:
-          POLYSAVER_RUN_NETWORK_E2E: "1"
+          POLYSAVER_RUN_NETWORK_E2E: '1'
+        # Runs the full download matrix, then the native playlist detection
+        # (which downloads nothing: it only asks the engine for the listing
+        # envelope). Each file is a separate binary, hence two commands.
         run: |
           cargo test --test e2e_real_downloads -- --ignored --nocapture
+          cargo test --test e2e_playlist_detection -- --ignored --nocapture

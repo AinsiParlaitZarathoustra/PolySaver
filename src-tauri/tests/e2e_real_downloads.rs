@@ -46,9 +46,14 @@ fn assert_bundled_sidecars_valid(resource_bin_dir: &Path) {
     let ytdlp_ver = String::from_utf8_lossy(&ytdlp_out.stdout)
         .trim()
         .to_string();
+    let expected_ytdlp_version =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../ytdlp-version.txt"))
+            .expect("ytdlp-version.txt must exist at the repository root")
+            .trim()
+            .to_string();
     assert_eq!(
-        ytdlp_ver, "2026.08.19",
-        "Expected yt-dlp 2026.08.19, got: {ytdlp_ver}"
+        ytdlp_ver, expected_ytdlp_version,
+        "Expected yt-dlp {expected_ytdlp_version}, got: {ytdlp_ver}"
     );
 
     // 2. Verify ffmpeg version & configuration (including libdav1d)
@@ -246,9 +251,7 @@ async fn test_real_matrix_youtube_and_tiktok_mp4_mov_mp3_flac() {
     let initial_settings = AppSettings::new(
         downloads_dir.to_string_lossy().to_string(),
         ThemeMode::Dark,
-        true,
         DownloadPreset::video(OutputFormat::Mp4, VideoQuality::Best).unwrap(),
-        3,
         polysaver_core::domain::Language::French,
     )
     .unwrap();

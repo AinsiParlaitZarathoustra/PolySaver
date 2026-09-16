@@ -33,8 +33,13 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
     getSettings: vi.fn(),
     setSettings: vi.fn(),
     startDownload: vi.fn(),
+    startPlaylistDownload: vi.fn().mockResolvedValue([]),
     listDownloads: vi.fn(),
     cancelDownload: vi.fn(),
+    cancelAnalyze: vi.fn(),
+    detectPlaylist: vi.fn().mockResolvedValue({ isPlaylist: false }),
+    cancelPlaylistDetection: vi.fn().mockResolvedValue(undefined),
+    retryDownload: vi.fn(),
     dismissDownload: vi.fn(),
     openDownloadSourceUrl: vi.fn(),
     pickDirectory: vi.fn(),
@@ -46,9 +51,33 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
     openHistoryFile: vi.fn(),
     openHistorySourceUrl: vi.fn(),
     openSupportPage: vi.fn().mockResolvedValue(undefined),
+    openContactEmail: vi.fn().mockResolvedValue(undefined),
     checkForUpdates: vi.fn().mockResolvedValue(null),
     downloadAndInstallUpdate: vi.fn().mockResolvedValue(undefined),
     restartApp: vi.fn().mockResolvedValue(undefined),
+    checkEngineUpdate: vi.fn().mockResolvedValue({
+      currentVersion: '2026.08.19',
+      latestVersion: '2026.08.19',
+      channel: 'stable',
+      outdated: false,
+      canUpdate: false,
+    }),
+    updateEngine: vi.fn().mockResolvedValue({ installedVersion: '2026.08.19', updated: true, latestVersion: null }),
+    rollbackEngine: vi.fn().mockResolvedValue({ installedVersion: '2026.08.19', updated: true, latestVersion: null }),
+    checkJsRuntime: vi.fn().mockResolvedValue({
+      kind: 'node',
+      version: '24.21.0',
+      path: '/tmp/node',
+      isReady: true,
+      versionTooOld: false,
+    }),
+    installJsRuntime: vi.fn().mockResolvedValue({
+      kind: 'node',
+      version: '24.21.0',
+      path: '/tmp/node',
+      isReady: true,
+      versionTooOld: false,
+    }),
     ...overrides,
   });
 
@@ -98,6 +127,7 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
         onClose={onClose}
         client={client}
         hasActiveDownloads={false}
+        onOpenPreferences={vi.fn()}
       />,
     );
 
@@ -105,8 +135,10 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
     expect(screen.getByText('Téléchargement rapide')).toBeInTheDocument();
     expect(screen.getByText('Téléchargement personnalisé')).toBeInTheDocument();
     expect(
-      screen.getByText(/Le téléchargement rapide ne demande aucune confirmation/),
+      screen.getByText(/3\. Le fichier se télécharge selon ce qui a été défini dans/),
     ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Ouvrir les préférences' })).toBeInTheDocument();
+    expect(screen.getByText('Préférences')).toBeInTheDocument();
 
     // Switch to Tab 1: Format Guide
     const formatTab = screen.getByRole('tab', { name: 'Guide des formats' });
@@ -133,6 +165,7 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
         onClose={onClose}
         client={client}
         hasActiveDownloads={false}
+        onOpenPreferences={vi.fn()}
       />,
     );
 
@@ -153,6 +186,7 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
         onClose={vi.fn()}
         client={client}
         hasActiveDownloads={false}
+        onOpenPreferences={vi.fn()}
       />,
     );
 
@@ -184,6 +218,7 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
         onClose={vi.fn()}
         client={client}
         hasActiveDownloads={true}
+        onOpenPreferences={vi.fn()}
       />,
     );
 
@@ -211,6 +246,7 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
         onClose={vi.fn()}
         client={client}
         hasActiveDownloads={false}
+        onOpenPreferences={vi.fn()}
       />,
     );
 

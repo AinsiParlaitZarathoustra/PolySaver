@@ -6,6 +6,7 @@ use crate::domain::media_url::MediaUrl;
 use crate::error::{CoreError, DownloadErrorDetails};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 /// Strongly-typed identifier for a download job.
@@ -95,6 +96,8 @@ pub struct DownloadJob {
     destination_path: Option<String>,
     error_message: Option<String>,
     error_details: Option<DownloadErrorDetails>,
+    target_dir: Option<PathBuf>,
+    retry_count: u8,
 }
 
 impl DownloadJob {
@@ -114,6 +117,8 @@ impl DownloadJob {
             destination_path: None,
             error_message: None,
             error_details: None,
+            target_dir: None,
+            retry_count: 0,
         }
     }
 
@@ -171,6 +176,41 @@ impl DownloadJob {
     #[must_use]
     pub fn error_message(&self) -> Option<&str> {
         self.error_message.as_deref()
+    }
+
+    /// Destination directory this job was configured with, if known.
+    #[must_use]
+    pub fn target_dir(&self) -> Option<&std::path::Path> {
+        self.target_dir.as_deref()
+    }
+
+    /// Records the destination directory chosen for this job (used for faithful retries).
+    pub fn set_target_dir(&mut self, target_dir: PathBuf) {
+        self.target_dir = Some(target_dir);
+    }
+
+    /// Number of automatic retry attempts already performed for this job.
+    #[must_use]
+    pub const fn retry_count(&self) -> u8 {
+        self.retry_count
+    }
+
+    /// Returns the job to `Queued` for a new automatic attempt.
+    ///
+    /// Valid from any non-terminal state (the pipeline may have failed while
+    /// downloading, converting, or finalizing). Increments the retry counter so
+    /// the UI can display `Tentative n/max`.
+    pub fn reset_for_retry(&mut self) -> Result<(), CoreError> {
+        self.ensure_not_terminal("reset_for_retry")?;
+        self.status = DownloadStatus::Queued;
+        self.progress_percent = None;
+        self.downloaded_bytes = None;
+        self.total_bytes = None;
+        self.speed_bytes_per_second = None;
+        self.error_message = None;
+        self.error_details = None;
+        self.retry_count = self.retry_count.saturating_add(1);
+        Ok(())
     }
 
     #[must_use]

@@ -17,3 +17,12 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 tokio-util = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+polysaver-core = { workspace = true }

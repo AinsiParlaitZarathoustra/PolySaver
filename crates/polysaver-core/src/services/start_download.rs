@@ -5,6 +5,7 @@ use crate::domain::download_job::{DownloadId, DownloadJob, DownloadStatus};
 use crate::domain::format::DownloadPreset;
 use crate::domain::history::{DownloadHistoryEntry, HistoryEntryId};
 use crate::domain::media_url::MediaUrl;
+use crate::domain::probe::MAX_PLAYLIST_DOWNLOADS;
 use crate::error::{CoreError, DownloadErrorCode, DownloadErrorDetails};
 use crate::ports::converter::{AudioCodec, ConvertRequest, MediaConverter};
 use crate::ports::event_sink::{DownloadProgressEvent, EventSink, ProgressPhase};
@@ -13,6 +14,7 @@ use crate::ports::media_downloader::{DownloadStreamRequest, MediaDownloader, Str
 use crate::ports::media_inspector::MediaInspector;
 use crate::ports::settings_repository::SettingsRepository;
 use crate::services::limiter::ConcurrencyLimiter;
+use crate::services::retry::RetryPolicy;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,10 +23,47 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_BASE_FILENAME_BYTES: usize = 180;
 
+/// Fixed internal cap on simultaneous download jobs (not user-configurable).
+const DEFAULT_MAX_CONCURRENT: usize = 3;
+
 const WINDOWS_RESERVED_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
+
+/// Resolves the destination directory for a job, applying the same validation to
+/// every entry point (single download, batch download, retry).
+fn resolve_target_dir(
+    settings: &crate::domain::AppSettings,
+    custom_output_dir: Option<PathBuf>,
+) -> Result<PathBuf, CoreError> {
+    let default_dir = PathBuf::from(settings.download_directory());
+
+    let Some(custom_dir) = custom_output_dir else {
+        return Ok(default_dir);
+    };
+
+    let path_str = custom_dir.to_string_lossy().trim().to_string();
+    if path_str.is_empty() {
+        return Ok(default_dir);
+    }
+    if path_str.starts_with('~') {
+        return Err(CoreError::InvalidSettings(
+            "Custom download directory cannot start with '~'".to_string(),
+        ));
+    }
+    if path_str.contains('\0') {
+        return Err(CoreError::InvalidSettings(
+            "Custom download directory cannot contain null bytes".to_string(),
+        ));
+    }
+    if !custom_dir.is_absolute() {
+        return Err(CoreError::InvalidSettings(format!(
+            "Custom download directory must be an absolute path: '{path_str}'"
+        )));
+    }
+    Ok(custom_dir)
+}
 
 /// Execution context encapsulating all runtime dependencies for the download pipeline.
 struct PipelineContext {
@@ -32,7 +71,6 @@ struct PipelineContext {
     url: MediaUrl,
     preset: DownloadPreset,
     target_dir: PathBuf,
-    parallel_segments: usize,
     temp_root: PathBuf,
     downloader: Arc<dyn MediaDownloader>,
     converter: Arc<dyn MediaConverter>,
@@ -42,6 +80,45 @@ struct PipelineContext {
     event_sink: Option<Arc<dyn EventSink>>,
     publish_mutex: Arc<Mutex<()>>,
     cancel_token: CancellationToken,
+}
+
+/// Immutable description of a job attempt, cloned into a fresh [`PipelineContext`]
+/// for every retry (the pipeline consumes its context by value).
+#[derive(Clone)]
+struct AttemptSpec {
+    job_id: DownloadId,
+    url: MediaUrl,
+    preset: DownloadPreset,
+    target_dir: PathBuf,
+    temp_root: PathBuf,
+    downloader: Arc<dyn MediaDownloader>,
+    converter: Arc<dyn MediaConverter>,
+    inspector: Arc<dyn MediaInspector>,
+    history_repo: Arc<dyn DownloadHistoryRepository>,
+    active_jobs: Arc<Mutex<HashMap<DownloadId, DownloadJob>>>,
+    event_sink: Option<Arc<dyn EventSink>>,
+    publish_mutex: Arc<Mutex<()>>,
+    cancel_token: CancellationToken,
+}
+
+impl AttemptSpec {
+    fn to_context(&self) -> PipelineContext {
+        PipelineContext {
+            job_id: self.job_id,
+            url: self.url.clone(),
+            preset: self.preset,
+            target_dir: self.target_dir.clone(),
+            temp_root: self.temp_root.clone(),
+            downloader: Arc::clone(&self.downloader),
+            converter: Arc::clone(&self.converter),
+            inspector: Arc::clone(&self.inspector),
+            history_repo: Arc::clone(&self.history_repo),
+            active_jobs: Arc::clone(&self.active_jobs),
+            event_sink: self.event_sink.clone(),
+            publish_mutex: Arc::clone(&self.publish_mutex),
+            cancel_token: self.cancel_token.clone(),
+        }
+    }
 }
 
 /// Service orchestrating the complete download pipeline from URL to finalized media file.
@@ -57,10 +134,20 @@ pub struct StartDownloadService {
     limiter: ConcurrencyLimiter,
     cancellation_tokens: Arc<Mutex<HashMap<DownloadId, CancellationToken>>>,
     publish_mutex: Arc<Mutex<()>>,
+    retry_policy: RetryPolicy,
+    engine_updater: Option<Arc<dyn EngineUpdater>>,
+}
+
+/// Port used to refresh the download engine after an `YtdlpUpdateRequired` failure.
+#[async_trait::async_trait]
+pub trait EngineUpdater: Send + Sync {
+    /// Downloads and installs the latest engine build. Implementations are
+    /// expected to be idempotent and to fail cleanly when offline.
+    async fn update_engine(&self) -> Result<String, CoreError>;
 }
 
 impl StartDownloadService {
-    /// Creates a new `StartDownloadService`.
+    /// Creates a new `StartDownloadService` with the default retry policy.
     #[must_use]
     pub fn new(
         downloader: Arc<dyn MediaDownloader>,
@@ -71,6 +158,31 @@ impl StartDownloadService {
         event_sink: Option<Arc<dyn EventSink>>,
         temp_root: PathBuf,
     ) -> Self {
+        Self::new_with_retry_policy(
+            downloader,
+            converter,
+            inspector,
+            settings_repo,
+            history_repo,
+            event_sink,
+            temp_root,
+            RetryPolicy::default(),
+        )
+    }
+
+    /// Creates a new `StartDownloadService` with an injected retry policy.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_retry_policy(
+        downloader: Arc<dyn MediaDownloader>,
+        converter: Arc<dyn MediaConverter>,
+        inspector: Arc<dyn MediaInspector>,
+        settings_repo: Arc<dyn SettingsRepository>,
+        history_repo: Arc<dyn DownloadHistoryRepository>,
+        event_sink: Option<Arc<dyn EventSink>>,
+        temp_root: PathBuf,
+        retry_policy: RetryPolicy,
+    ) -> Self {
         Self {
             downloader,
             converter,
@@ -80,18 +192,26 @@ impl StartDownloadService {
             event_sink,
             temp_root,
             active_jobs: Arc::new(Mutex::new(HashMap::new())),
-            limiter: ConcurrencyLimiter::new(3),
+            limiter: ConcurrencyLimiter::new(DEFAULT_MAX_CONCURRENT),
             cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             publish_mutex: Arc::new(Mutex::new(())),
+            retry_policy,
+            engine_updater: None,
         }
     }
 
-    /// Dynamically updates the concurrency limit.
-    pub fn set_max_concurrent(&self, max: usize) {
-        self.limiter.set_limit(max);
+    /// Injects the engine updater used by the single post-update retry path.
+    #[must_use]
+    pub fn with_engine_updater(mut self, updater: Arc<dyn EngineUpdater>) -> Self {
+        self.engine_updater = Some(updater);
+        self
     }
 
     /// Submits a download request, validates inputs, and launches background processing.
+    ///
+    /// Playlist URLs are refused here: they must go through
+    /// [`Self::start_download_batch`] so that each video becomes its own job with its
+    /// own progress, cancellation, retry and history entry.
     pub async fn start_download(
         &self,
         raw_url: &str,
@@ -99,38 +219,107 @@ impl StartDownloadService {
         custom_output_dir: Option<PathBuf>,
     ) -> Result<DownloadJob, CoreError> {
         let url = MediaUrl::parse(raw_url)?;
+        if url.is_playlist() {
+            return Err(CoreError::InvalidState(
+                "Cette URL est une playlist: utilisez le téléchargement de playlist.".to_string(),
+            ));
+        }
         let settings = self.settings_repo.load().await?;
-        self.limiter.set_limit(settings.effective_max_concurrent());
+        let target_dir = resolve_target_dir(&settings, custom_output_dir)?;
 
+        let mut job = DownloadJob::new(
+            url,
+            requested_preset.unwrap_or_else(|| settings.default_preset()),
+        );
+        job.set_target_dir(target_dir.clone());
+
+        Ok(self.enqueue_and_spawn(job, target_dir).await)
+    }
+
+    /// Queues one job per selected playlist entry.
+    ///
+    /// Every URL is re-parsed and re-validated here, so the frontend can never inject
+    /// an unchecked address. The concurrency limiter then runs them a few at a time
+    /// while each video keeps independent progress, cancellation, retry and history.
+    pub async fn start_download_batch(
+        &self,
+        urls: Vec<MediaUrl>,
+        requested_preset: Option<DownloadPreset>,
+        custom_output_dir: Option<PathBuf>,
+    ) -> Result<Vec<DownloadJob>, CoreError> {
+        if urls.is_empty() {
+            return Err(CoreError::InvalidSettings(
+                "Aucune vidéo sélectionnée.".to_string(),
+            ));
+        }
+        if urls.len() > MAX_PLAYLIST_DOWNLOADS {
+            return Err(CoreError::InvalidSettings(format!(
+                "Trop de vidéos sélectionnées ({}). Maximum: {MAX_PLAYLIST_DOWNLOADS}.",
+                urls.len()
+            )));
+        }
+
+        let settings = self.settings_repo.load().await?;
         let preset = requested_preset.unwrap_or_else(|| settings.default_preset());
+        let target_dir = resolve_target_dir(&settings, custom_output_dir)?;
 
-        let target_dir = if let Some(custom_dir) = custom_output_dir {
-            let path_str = custom_dir.to_string_lossy().trim().to_string();
-            if path_str.is_empty() {
-                PathBuf::from(settings.download_directory())
-            } else {
-                if path_str.starts_with('~') {
-                    return Err(CoreError::InvalidSettings(
-                        "Custom download directory cannot start with '~'".to_string(),
-                    ));
-                }
-                if path_str.contains('\0') {
-                    return Err(CoreError::InvalidSettings(
-                        "Custom download directory cannot contain null bytes".to_string(),
-                    ));
-                }
-                if !custom_dir.is_absolute() {
-                    return Err(CoreError::InvalidSettings(format!(
-                        "Custom download directory must be an absolute path: '{path_str}'"
-                    )));
-                }
-                custom_dir
+        let mut jobs = Vec::with_capacity(urls.len());
+        for url in urls {
+            let mut job = DownloadJob::new(url, preset);
+            job.set_target_dir(target_dir.clone());
+            jobs.push(self.enqueue_and_spawn(job, target_dir.clone()).await);
+        }
+        Ok(jobs)
+    }
+
+    /// Re-queues a failed job as a brand new queued job preserving URL, preset and target directory.
+    ///
+    /// A new job (new identifier) is created rather than mutating the failed one, so the
+    /// "terminal jobs never mutate" invariant is preserved and no `Failed -> Queued`
+    /// transition is added to the domain.
+    pub async fn retry_download(&self, job_id: DownloadId) -> Result<DownloadJob, CoreError> {
+        let (url, preset, stored_target_dir) = {
+            let lock = self.active_jobs.lock().await;
+            let job = lock.get(&job_id).ok_or(CoreError::JobNotFound(job_id))?;
+            if job.status() != DownloadStatus::Failed {
+                return Err(CoreError::InvalidState(format!(
+                    "Cannot retry job '{job_id}' in state '{:?}': only failed jobs can be retried",
+                    job.status()
+                )));
             }
-        } else {
-            PathBuf::from(settings.download_directory())
+            (
+                job.url().clone(),
+                job.preset(),
+                job.target_dir().map(PathBuf::from),
+            )
         };
 
-        let job = DownloadJob::new(url.clone(), preset);
+        // Remove the failed entry (and any token) before re-queueing.
+        {
+            let mut lock = self.active_jobs.lock().await;
+            lock.remove(&job_id);
+        }
+        {
+            let mut tokens = self.cancellation_tokens.lock().await;
+            tokens.remove(&job_id);
+        }
+
+        let target_dir = match stored_target_dir {
+            Some(dir) => dir,
+            None => {
+                let settings = self.settings_repo.load().await?;
+                PathBuf::from(settings.download_directory())
+            }
+        };
+
+        let mut job = DownloadJob::new(url, preset);
+        job.set_target_dir(target_dir.clone());
+
+        Ok(self.enqueue_and_spawn(job, target_dir).await)
+    }
+
+    /// Stores a job, emits `queued`, and spawns the background pipeline task.
+    async fn enqueue_and_spawn(&self, job: DownloadJob, target_dir: PathBuf) -> DownloadJob {
         let job_id = job.id();
         let cancel_token = CancellationToken::new();
 
@@ -150,12 +339,11 @@ impl StartDownloadService {
         }
 
         // Spawn background execution task
-        let ctx = PipelineContext {
+        let spec = AttemptSpec {
             job_id,
-            url,
-            preset,
+            url: job.url().clone(),
+            preset: job.preset(),
             target_dir,
-            parallel_segments: settings.effective_parallel_segments(),
             temp_root: self.temp_root.clone(),
             downloader: Arc::clone(&self.downloader),
             converter: Arc::clone(&self.converter),
@@ -171,9 +359,14 @@ impl StartDownloadService {
         let active_jobs = Arc::clone(&self.active_jobs);
         let cancellation_tokens = Arc::clone(&self.cancellation_tokens);
         let event_sink = self.event_sink.clone();
+        let retry_policy = self.retry_policy;
+        let engine_updater = self.engine_updater.clone();
 
         tokio::spawn(async move {
             let permit_res = limiter.acquire(Some(&cancel_token)).await;
+            // The permit is held for the whole retry cycle on purpose: releasing
+            // it between attempts could let another job take the slot and leave
+            // this retry waiting indefinitely.
             let _permit = match permit_res {
                 Ok(p) => p,
                 Err(CoreError::OperationCancelled) => {
@@ -200,37 +393,151 @@ impl StartDownloadService {
                 }
             };
 
-            let result = Self::run_pipeline(ctx).await;
+            let mut last_error: Option<DownloadErrorDetails> = None;
+            let mut post_update_retry_used = false;
 
-            match result {
-                Ok(()) => {
-                    let mut tokens = cancellation_tokens.lock().await;
-                    tokens.remove(&job_id);
-                }
-                Err(CoreError::OperationCancelled) => {
-                    Self::handle_job_canceled(
-                        &active_jobs,
-                        &cancellation_tokens,
-                        &event_sink,
-                        job_id,
-                    )
-                    .await;
-                }
-                Err(err) => {
-                    let details = err.to_download_error_details();
-                    Self::handle_job_failure(
-                        &active_jobs,
-                        &cancellation_tokens,
-                        &event_sink,
-                        job_id,
-                        details,
-                    )
-                    .await;
+            // One extra loop slot is reserved for the single post-update retry,
+            // which must remain possible even when the stale-engine error surfaces
+            // on the last regular attempt.
+            let hard_attempt_cap = retry_policy.max_attempts + 1;
+            let mut attempt: u32 = 1;
+
+            while attempt <= hard_attempt_cap {
+                let ctx = spec.to_context();
+                match Self::run_pipeline(ctx).await {
+                    Ok(()) => {
+                        let mut tokens = cancellation_tokens.lock().await;
+                        tokens.remove(&job_id);
+                        return;
+                    }
+                    Err(CoreError::OperationCancelled) => {
+                        Self::handle_job_canceled(
+                            &active_jobs,
+                            &cancellation_tokens,
+                            &event_sink,
+                            job_id,
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(err) => {
+                        let details = err.to_download_error_details();
+
+                        // Transient failure with attempts left: warn and back off.
+                        if details.retryable
+                            && attempt < retry_policy.max_attempts
+                            && details.code != DownloadErrorCode::HistorySaveFailed
+                        {
+                            Self::handle_job_retry(
+                                &active_jobs,
+                                &event_sink,
+                                job_id,
+                                attempt + 1,
+                                retry_policy.max_attempts,
+                            )
+                            .await;
+                            if !retry_policy
+                                .sleep_before_retry(attempt, &cancel_token)
+                                .await
+                            {
+                                Self::handle_job_canceled(
+                                    &active_jobs,
+                                    &cancellation_tokens,
+                                    &event_sink,
+                                    job_id,
+                                )
+                                .await;
+                                return;
+                            }
+                            attempt += 1;
+                            continue;
+                        }
+
+                        // Stale engine: update it once, then retry exactly once.
+                        if details.code == DownloadErrorCode::YtdlpUpdateRequired
+                            && !post_update_retry_used
+                        {
+                            post_update_retry_used = true;
+                            let updated = match engine_updater.as_ref() {
+                                Some(updater) => updater.update_engine().await.is_ok(),
+                                None => false,
+                            };
+                            if updated {
+                                if let Some(ref sink) = event_sink {
+                                    sink.emit_warning(
+                                        &crate::ports::event_sink::DownloadWarningEvent {
+                                            download_id: job_id,
+                                            code: "ENGINE_UPDATE_RETRY".to_string(),
+                                            message:
+                                                "Moteur mis à jour, nouvelle tentative en cours."
+                                                    .to_string(),
+                                        },
+                                    );
+                                }
+                                Self::handle_job_retry(
+                                    &active_jobs,
+                                    &event_sink,
+                                    job_id,
+                                    attempt + 1,
+                                    hard_attempt_cap,
+                                )
+                                .await;
+                                attempt += 1;
+                                continue;
+                            }
+                            // Update failed: keep the original error.
+                            last_error = Some(details);
+                            break;
+                        }
+
+                        last_error = Some(details);
+                        break;
+                    }
                 }
             }
+
+            let details = last_error.unwrap_or_else(|| {
+                DownloadErrorDetails::from_code(DownloadErrorCode::DownloadProcessFailed)
+            });
+            Self::handle_job_failure(
+                &active_jobs,
+                &cancellation_tokens,
+                &event_sink,
+                job_id,
+                details,
+            )
+            .await;
         });
 
-        Ok(job)
+        job
+    }
+
+    /// Updates job state for an upcoming automatic attempt and emits a warning.
+    async fn handle_job_retry(
+        active_jobs: &Arc<Mutex<HashMap<DownloadId, DownloadJob>>>,
+        event_sink: &Option<Arc<dyn EventSink>>,
+        job_id: DownloadId,
+        next_attempt: u32,
+        max_attempts: u32,
+    ) {
+        let updated = {
+            let mut lock = active_jobs.lock().await;
+            if let Some(job) = lock.get_mut(&job_id) {
+                // A job canceled meanwhile is terminal: ignore the reset.
+                job.reset_for_retry().is_ok().then(|| job.clone())
+            } else {
+                None
+            }
+        };
+
+        if let (Some(ref sink), Some(job)) = (event_sink, updated) {
+            sink.emit_queued(&job);
+            sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+                download_id: job_id,
+                code: "RETRY_ATTEMPT".to_string(),
+                message: format!("Nouvelle tentative {next_attempt}/{max_attempts}"),
+            });
+        }
     }
 
     /// Explicitly cancels an in-progress or queued download job immediately.
@@ -319,6 +626,10 @@ impl StartDownloadService {
     }
 
     /// Retrieves the verified canonical path of a history entry.
+    ///
+    /// The stored path must canonicalize to a file located inside the download
+    /// directory recorded with the entry (or the current settings directory for
+    /// legacy entries without one). Anything else is refused without opening it.
     pub async fn get_history_file_path(&self, id: HistoryEntryId) -> Result<PathBuf, CoreError> {
         let entries = self.history_repo.load().await?;
         let entry = entries.into_iter().find(|e| e.id() == id).ok_or_else(|| {
@@ -328,18 +639,16 @@ impl StartDownloadService {
             CoreError::DownloadFailed(details)
         })?;
 
-        let path = PathBuf::from(entry.destination_path());
-        if !path.exists() || !path.is_file() {
-            let mut details =
-                DownloadErrorDetails::from_code(DownloadErrorCode::OutputFileNotFound);
-            details.message = format!(
-                "Le fichier téléchargé '{}' est introuvable sur le disque.",
-                path.display()
-            );
-            return Err(CoreError::DownloadFailed(details));
-        }
+        let allowed_dir = match entry.download_dir() {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                let settings = self.settings_repo.load().await?;
+                PathBuf::from(settings.download_directory())
+            }
+        };
 
-        Ok(path)
+        let path = PathBuf::from(entry.destination_path());
+        ensure_path_within_download_dir(&path, &allowed_dir)
     }
 
     /// Retrieves and validates the source URL of a history entry.
@@ -381,36 +690,37 @@ impl StartDownloadService {
         &self,
         job_id: DownloadId,
     ) -> Result<PathBuf, CoreError> {
-        let lock = self.active_jobs.lock().await;
-        let job = lock.get(&job_id).ok_or(CoreError::JobNotFound(job_id))?;
+        let (path_str, allowed_dir) = {
+            let lock = self.active_jobs.lock().await;
+            let job = lock.get(&job_id).ok_or(CoreError::JobNotFound(job_id))?;
 
-        if job.status() != DownloadStatus::Completed {
-            let mut details =
-                DownloadErrorDetails::from_code(DownloadErrorCode::OutputFileNotFound);
-            details.message = format!("Le téléchargement '{job_id}' n'est pas encore terminé.");
-            return Err(CoreError::DownloadFailed(details));
-        }
+            if job.status() != DownloadStatus::Completed {
+                let mut details =
+                    DownloadErrorDetails::from_code(DownloadErrorCode::OutputFileNotFound);
+                details.message = format!("Le téléchargement '{job_id}' n'est pas encore terminé.");
+                return Err(CoreError::DownloadFailed(details));
+            }
 
-        let path_str = job.destination_path().ok_or_else(|| {
-            let mut details =
-                DownloadErrorDetails::from_code(DownloadErrorCode::OutputFileNotFound);
-            details.message =
-                format!("Chemin de destination introuvable pour le téléchargement '{job_id}'.");
-            CoreError::DownloadFailed(details)
-        })?;
+            let path_str = job.destination_path().map(str::to_string).ok_or_else(|| {
+                let mut details =
+                    DownloadErrorDetails::from_code(DownloadErrorCode::OutputFileNotFound);
+                details.message =
+                    format!("Chemin de destination introuvable pour le téléchargement '{job_id}'.");
+                CoreError::DownloadFailed(details)
+            })?;
 
-        let path = PathBuf::from(path_str);
-        if !path.exists() || !path.is_file() {
-            let mut details =
-                DownloadErrorDetails::from_code(DownloadErrorCode::OutputFileNotFound);
-            details.message = format!(
-                "Le fichier téléchargé '{}' est introuvable sur le disque.",
-                path.display()
-            );
-            return Err(CoreError::DownloadFailed(details));
-        }
+            (path_str, job.target_dir().map(PathBuf::from))
+        };
 
-        Ok(path)
+        let allowed_dir = match allowed_dir {
+            Some(dir) => dir,
+            None => {
+                let settings = self.settings_repo.load().await?;
+                PathBuf::from(settings.download_directory())
+            }
+        };
+
+        ensure_path_within_download_dir(&PathBuf::from(path_str), &allowed_dir)
     }
 
     async fn run_pipeline(ctx: PipelineContext) -> Result<(), CoreError> {
@@ -522,7 +832,6 @@ impl StartDownloadService {
                     url: ctx.url.clone(),
                     preset: ctx.preset,
                     temp_dir: job_temp_dir.clone(),
-                    parallel_segments: ctx.parallel_segments,
                     cancellation_token: Some(ctx.cancel_token.clone()),
                 },
                 progress_callback,
@@ -539,6 +848,42 @@ impl StartDownloadService {
         if ctx.cancel_token.is_cancelled() {
             let _ = tokio::fs::remove_dir_all(&job_temp_dir).await;
             return Err(CoreError::OperationCancelled);
+        }
+
+        // Non-fatal engine obsolescence signal: yt-dlp warns even on success.
+        if downloaded_streams.engine_outdated {
+            if let Some(ref sink) = ctx.event_sink {
+                sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+                    download_id: ctx.job_id,
+                    code: "YTDLP_UPDATE_REQUIRED".to_string(),
+                    message: "Mettez à jour le moteur.".to_string(),
+                });
+            }
+        }
+
+        // Cookie import problems are never silent: yt-dlp continues without
+        // cookies after a failed keychain/disk-permission access.
+        match downloaded_streams.cookies_diagnostic {
+            Some(crate::ports::media_downloader::CookiesDiagnostic::DecryptFailed) => {
+                if let Some(ref sink) = ctx.event_sink {
+                    sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+                        download_id: ctx.job_id,
+                        code: "COOKIES_DECRYPT_FAILED".to_string(),
+                        message: "Impossible de déchiffrer les cookies du navigateur.".to_string(),
+                    });
+                }
+            }
+            Some(crate::ports::media_downloader::CookiesDiagnostic::PermissionDenied) => {
+                if let Some(ref sink) = ctx.event_sink {
+                    sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+                        download_id: ctx.job_id,
+                        code: "COOKIES_PERMISSION_DENIED".to_string(),
+                        message: "Accès refusé aux cookies du navigateur (autorisation manquante)."
+                            .to_string(),
+                    });
+                }
+            }
+            _ => {}
         }
 
         // Update job title
@@ -756,6 +1101,8 @@ impl StartDownloadService {
             &base_filename,
             ext,
             &ctx.publish_mutex,
+            &ctx.event_sink,
+            ctx.job_id,
         )
         .await?;
 
@@ -779,13 +1126,14 @@ impl StartDownloadService {
 
         // Record history entry idempotently; on failure emit non-fatal warning without failing job
         if let Some(ref job) = completed_job {
-            if let Ok(history_entry) = DownloadHistoryEntry::new(
+            if let Ok(history_entry) = DownloadHistoryEntry::new_with_dir(
                 ctx.job_id,
                 ctx.url,
                 downloaded_streams.title,
                 ctx.preset,
                 final_path_str,
                 None,
+                ctx.target_dir.to_string_lossy().to_string(),
             ) {
                 if let Err(err) = ctx.history_repo.append(history_entry).await {
                     if let Some(ref sink) = ctx.event_sink {
@@ -870,6 +1218,49 @@ impl StartDownloadService {
     }
 }
 
+/// Ensures `candidate` is an existing regular file whose canonical path lives
+/// inside `allowed_dir` (also canonicalized). Refuses symlink escapes.
+fn ensure_path_within_download_dir(
+    candidate: &Path,
+    allowed_dir: &Path,
+) -> Result<PathBuf, CoreError> {
+    let not_found = |msg: String| {
+        let mut details = DownloadErrorDetails::from_code(DownloadErrorCode::OutputFileNotFound);
+        details.message = msg;
+        CoreError::DownloadFailed(details)
+    };
+
+    if !candidate.exists() || !candidate.is_file() {
+        return Err(not_found(format!(
+            "Le fichier téléchargé '{}' est introuvable sur le disque.",
+            candidate.display()
+        )));
+    }
+
+    let canonical_file = std::fs::canonicalize(candidate).map_err(|err| {
+        not_found(format!(
+            "Impossible de résoudre le chemin '{}': {err}",
+            candidate.display()
+        ))
+    })?;
+
+    let canonical_dir = std::fs::canonicalize(allowed_dir).map_err(|_| {
+        not_found(format!(
+            "Le dossier de téléchargement '{}' est introuvable.",
+            allowed_dir.display()
+        ))
+    })?;
+
+    if !canonical_file.starts_with(&canonical_dir) {
+        return Err(not_found(format!(
+            "Le fichier '{}' est en dehors du dossier de téléchargement autorisé.",
+            candidate.display()
+        )));
+    }
+
+    Ok(canonical_file)
+}
+
 /// Sanitizes a title into a bounded UTF-8 safe filename.
 pub fn sanitize_filename(title: &str) -> String {
     let forbidden = ['/', '\\', '?', '%', '*', ':', '|', '"', '<', '>', '\0'];
@@ -918,6 +1309,83 @@ pub fn sanitize_filename(title: &str) -> String {
     }
 }
 
+/// Maximum age before an orphaned `job_*` temporary directory is purged.
+///
+/// A directory younger than this may belong to a concurrently running instance,
+/// so it is left alone; anything older is the debris of a crash or a SIGKILL and
+/// would otherwise accumulate indefinitely (hundreds of MB have been observed).
+pub const ORPHAN_TEMP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Removes `job_*` directories older than [`ORPHAN_TEMP_MAX_AGE`] from `temp_root`.
+///
+/// Returns the number of directories removed. A missing `temp_root` is not an
+/// error: nothing has been downloaded yet on a fresh installation.
+///
+/// Only the modification time is consulted, so no inter-process lock is needed.
+pub async fn purge_orphan_temp_dirs(temp_root: &Path) -> usize {
+    purge_orphan_temp_dirs_older_than(temp_root, ORPHAN_TEMP_MAX_AGE).await
+}
+
+/// Age-parameterized variant of [`purge_orphan_temp_dirs`], used by tests to
+/// avoid waiting a full day for the threshold.
+pub async fn purge_orphan_temp_dirs_older_than(
+    temp_root: &Path,
+    max_age: std::time::Duration,
+) -> usize {
+    let Ok(mut entries) = tokio::fs::read_dir(temp_root).await else {
+        return 0;
+    };
+
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("job_") {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        let age = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .unwrap_or_default();
+
+        if age >= max_age && tokio::fs::remove_dir_all(entry.path()).await.is_ok() {
+            removed += 1;
+        }
+    }
+
+    removed
+}
+
+/// Emits a non-fatal warning when the published file could not be flushed to disk.
+fn emit_publish_sync_warning(
+    event_sink: &Option<Arc<dyn EventSink>>,
+    job_id: DownloadId,
+    path: &Path,
+    err: &std::io::Error,
+) {
+    if let Some(sink) = event_sink {
+        sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+            download_id: job_id,
+            code: "PUBLISH_SYNC_FAILED".to_string(),
+            message: format!(
+                "Impossible de synchroniser '{}' sur le disque: {err}",
+                path.display()
+            ),
+        });
+    }
+}
+
 /// Publishes the converted media file to the destination directory without overwriting any existing file.
 async fn publish_media_no_clobber(
     temp_converted_file: &Path,
@@ -925,6 +1393,8 @@ async fn publish_media_no_clobber(
     base_name: &str,
     ext: &str,
     publish_mutex: &Arc<Mutex<()>>,
+    event_sink: &Option<Arc<dyn EventSink>>,
+    job_id: DownloadId,
 ) -> Result<PathBuf, CoreError> {
     let _lock = publish_mutex.lock().await;
 
@@ -965,6 +1435,12 @@ async fn publish_media_no_clobber(
 
         match std::fs::hard_link(&stage_path, &candidate_path) {
             Ok(()) => {
+                // Flush the published file before removing the staging link.
+                if let Ok(file) = std::fs::File::open(&candidate_path) {
+                    if let Err(err) = file.sync_all() {
+                        emit_publish_sync_warning(event_sink, job_id, &candidate_path, &err);
+                    }
+                }
                 let _ = tokio::fs::remove_file(&stage_path).await;
                 return Ok(candidate_path);
             }
@@ -992,7 +1468,15 @@ async fn publish_media_no_clobber(
                                 "Failed to write destination file: {e}"
                             )));
                         }
-                        let _ = dest_file.sync_all();
+                        // Treat fsync failure as a visible (non-fatal) warning.
+                        if let Err(sync_err) = dest_file.sync_all() {
+                            emit_publish_sync_warning(
+                                event_sink,
+                                job_id,
+                                &candidate_path,
+                                &sync_err,
+                            );
+                        }
                         let _ = std::fs::remove_file(&stage_path);
                         return Ok(candidate_path);
                     }

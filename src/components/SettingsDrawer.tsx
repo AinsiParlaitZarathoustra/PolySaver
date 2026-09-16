@@ -12,8 +12,6 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  FormControlLabel,
-  Switch,
   TextField,
   Card,
   Chip,
@@ -28,10 +26,11 @@ import {
 import CloseIcon from '@mui/icons-material/Close';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
-import BrightnessAutoIcon from '@mui/icons-material/BrightnessAuto';
+import LaptopIcon from '@mui/icons-material/Laptop';
 import VideocamIcon from '@mui/icons-material/Videocam';
 import AudiotrackIcon from '@mui/icons-material/Audiotrack';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import UpgradeIcon from '@mui/icons-material/Upgrade';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import CheckIcon from '@mui/icons-material/Check';
@@ -39,6 +38,9 @@ import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import { useTranslation } from 'react-i18next';
 import type {
   AppSettingsDto,
+  CookiesBrowser,
+  EngineChannel,
+  EngineUpdateStatusDto,
   HealthStatus,
   Language,
   Mp3Quality,
@@ -60,6 +62,8 @@ interface SettingsDrawerProps {
   saveStatus: AutosaveStatus;
   errorMessage?: string | null;
   onBrowseDirectory?: (defaultPath?: string) => Promise<string | null>;
+  /** Allows reopening the JavaScript runtime setup dialog from diagnostics. */
+  onOpenJsRuntimeSetup?: () => void;
 }
 
 export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
@@ -70,6 +74,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   saveStatus,
   errorMessage,
   onBrowseDirectory,
+  onOpenJsRuntimeSetup,
 }) => {
   const { t, i18n } = useTranslation();
 
@@ -95,6 +100,12 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [loadingHealth, setLoadingHealth] = useState(false);
   const [browseError, setBrowseError] = useState<string | null>(null);
+  const [engineStatus, setEngineStatus] = useState<EngineUpdateStatusDto | null>(null);
+  const [isUpdatingEngine, setIsUpdatingEngine] = useState(false);
+  const [isRollingBackEngine, setIsRollingBackEngine] = useState(false);
+  const [engineUpdateError, setEngineUpdateError] = useState<string | null>(null);
+  const [engineUpdateDone, setEngineUpdateDone] = useState(false);
+  const [healthError, setHealthError] = useState(false);
 
   // Derive active category from current preset
   const isAudio =
@@ -129,14 +140,72 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
 
   const fetchHealth = async () => {
     setLoadingHealth(true);
+    setHealthError(false);
     try {
       const res = await defaultIpcClient.healthCheck();
       setHealth(res);
+      // Best-effort engine update status; never blocks the drawer.
+      try {
+        const engine = await defaultIpcClient.checkEngineUpdate();
+        setEngineStatus(engine);
+      } catch {
+        setEngineStatus(null);
+      }
     } catch {
-      // Ignore health check error in UI
+      // Distinguish "engine unavailable" from "could not read engine status".
+      setHealthError(true);
     } finally {
       setLoadingHealth(false);
     }
+  };
+
+  const handleUpdateEngine = async () => {
+    setIsUpdatingEngine(true);
+    setEngineUpdateError(null);
+    setEngineUpdateDone(false);
+    try {
+      const result = await defaultIpcClient.updateEngine();
+      setEngineUpdateDone(true);
+      if (!result.updated) {
+        setEngineUpdateError(null);
+      }
+      await fetchHealth();
+    } catch (err) {
+      setEngineUpdateError(
+        err instanceof Error ? err.message : t('engine.updateFailed'),
+      );
+    } finally {
+      setIsUpdatingEngine(false);
+    }
+  };
+
+  const handleRollbackEngine = async () => {
+    setIsRollingBackEngine(true);
+    setEngineUpdateError(null);
+    setEngineUpdateDone(false);
+    try {
+      await defaultIpcClient.rollbackEngine();
+      await fetchHealth();
+    } catch (err) {
+      setEngineUpdateError(
+        err instanceof Error ? err.message : t('engine.rollbackFailed'),
+      );
+    } finally {
+      setIsRollingBackEngine(false);
+    }
+  };
+
+  const handleEngineChannelChange = (channel: EngineChannel) => {
+    onUpdateSettings({ engineChannel: channel }, true);
+    // Re-read the status against the newly selected channel.
+    setTimeout(() => {
+      void fetchHealth();
+    }, 0);
+  };
+
+  const handleCookiesChange = (value: string) => {
+    const browser = value === '' ? undefined : (value as CookiesBrowser);
+    onUpdateSettings({ cookiesFromBrowser: browser }, true);
   };
 
   const handleThemeChange = (
@@ -154,28 +223,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   ) => {
     if (newLang !== null) {
       onUpdateSettings({ language: newLang }, true);
-    }
-  };
-
-  const handleParallelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const checked = e.target.checked;
-    onUpdateSettings(
-      {
-        parallelDownloads: checked,
-      },
-      true,
-    );
-  };
-
-  const handleMaxConcurrentChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const parsed = parseInt(e.target.value, 10);
-    if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 8) {
-      onUpdateSettings(
-        {
-          maxConcurrent: parsed,
-        },
-        true,
-      );
     }
   };
 
@@ -402,7 +449,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
             <ToggleButton value="system" aria-label={t('settings.theme.systemAria')}>
               <Tooltip title={t('settings.theme.system')}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <BrightnessAutoIcon fontSize="small" />
+                  <LaptopIcon fontSize="small" />
                   <Typography variant="body2">{t('settings.theme.system')}</Typography>
                 </Box>
               </Tooltip>
@@ -512,6 +559,8 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                     <MenuItem value="p720">720p · HD</MenuItem>
                     <MenuItem value="p480">480p · SD</MenuItem>
                     <MenuItem value="p360">360p</MenuItem>
+                    <MenuItem value="p240">240p</MenuItem>
+                    <MenuItem value="p144">144p</MenuItem>
                   </Select>
                 </FormControl>
               </>
@@ -568,42 +617,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
           </Stack>
         </Box>
 
-        {/* Parallel Downloads Switch */}
-        <Box>
-          <FormControlLabel
-            control={
-              <Switch
-                checked={settings.parallelDownloads}
-                onChange={handleParallelChange}
-                color="primary"
-              />
-            }
-            label={
-              <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                {t('settings.concurrency.label')}
-              </Typography>
-            }
-          />
-          {settings.parallelDownloads && (
-            <Box sx={{ mt: 1.5, pl: 2 }}>
-              <TextField
-                select
-                size="small"
-                label={i18n.language === 'fr' ? 'Téléchargements simultanés' : 'Max concurrent downloads'}
-                value={settings.maxConcurrent || 3}
-                onChange={handleMaxConcurrentChange}
-                sx={{ width: 240 }}
-              >
-                {[1, 2, 3, 4, 5, 6, 7, 8].map((num) => (
-                  <MenuItem key={num} value={num}>
-                    {num}
-                  </MenuItem>
-                ))}
-              </TextField>
-            </Box>
-          )}
-        </Box>
-
         {/* Compact Diagnostics */}
         <Box>
           <Box
@@ -617,21 +630,48 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
               {t('settings.diagnostics.label')}
             </Typography>
-            <IconButton
-              size="small"
-              onClick={fetchHealth}
-              disabled={loadingHealth}
-              aria-label={t('settings.diagnostics.label')}
-            >
-              {loadingHealth ? (
-                <CircularProgress size={14} />
-              ) : (
-                <RefreshIcon fontSize="small" />
-              )}
-            </IconButton>
+            <Stack direction="row" spacing={0.5} alignItems="center">
+              <Tooltip title={t('settings.diagnostics.refreshAria')}>
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchHealth}
+                    disabled={loadingHealth}
+                    aria-label={t('settings.diagnostics.refreshAria')}
+                  >
+                    {loadingHealth ? (
+                      <CircularProgress size={14} />
+                    ) : (
+                      <RefreshIcon fontSize="small" />
+                    )}
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title={t('engine.updateButton')}>
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={handleUpdateEngine}
+                    disabled={isUpdatingEngine || loadingHealth}
+                    aria-label={t('engine.updateButton')}
+                  >
+                    {isUpdatingEngine ? (
+                      <CircularProgress size={14} />
+                    ) : (
+                      <UpgradeIcon fontSize="small" />
+                    )}
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </Stack>
           </Box>
 
           <Stack spacing={1}>
+            {healthError && (
+              <Alert severity="warning" onClose={() => setHealthError(false)}>
+                {t('engine.diagnosticsFailed')}
+              </Alert>
+            )}
             <Card variant="outlined" sx={{ p: 1.25 }}>
               <Box
                 sx={{
@@ -645,26 +685,165 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                     yt-dlp
                   </Typography>
                   {health?.ytdlp.version && (
-                    <Typography variant="caption" color="text.secondary">
-                      v{health.ytdlp.version}
+                    <Typography variant="caption" color="text.secondary" component="div">
+                      {t('engine.currentVersion')} : v{health.ytdlp.version}
+                    </Typography>
+                  )}
+                  {engineStatus?.latestVersion && (
+                    <Typography variant="caption" color="text.secondary" component="div">
+                      {t('engine.latestVersion')} : v{engineStatus.latestVersion}
                     </Typography>
                   )}
                 </Box>
-                <Chip
-                  size="small"
-                  icon={
-                    health?.ytdlp.isReady ? (
-                      <CheckCircleOutlineIcon fontSize="small" />
-                    ) : (
-                      <ErrorOutlineIcon fontSize="small" />
-                    )
-                  }
-                  label={health?.ytdlp.isReady ? t('settings.diagnostics.ready') : t('settings.diagnostics.unavailable')}
-                  color={health?.ytdlp.isReady ? 'success' : 'error'}
-                  variant="outlined"
-                  sx={{ height: 22, fontSize: '0.75rem' }}
-                />
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  {engineStatus?.outdated && (
+                    <Chip
+                      size="small"
+                      label={t('engine.outdatedTitle')}
+                      color="warning"
+                      variant="outlined"
+                      sx={{ height: 22, fontSize: '0.75rem' }}
+                    />
+                  )}
+                  <Chip
+                    size="small"
+                    icon={
+                      health?.ytdlp.isReady ? (
+                        <CheckCircleOutlineIcon fontSize="small" />
+                      ) : (
+                        <ErrorOutlineIcon fontSize="small" />
+                      )
+                    }
+                    label={health?.ytdlp.isReady ? t('settings.diagnostics.ready') : t('settings.diagnostics.unavailable')}
+                    color={health?.ytdlp.isReady ? 'success' : 'error'}
+                    variant="outlined"
+                    sx={{ height: 22, fontSize: '0.75rem' }}
+                  />
+                </Stack>
               </Box>
+              {(engineStatus?.outdated || engineStatus?.canUpdate) && (
+                <Box sx={{ mt: 1 }}>
+                  <Button
+                    fullWidth
+                    size="small"
+                    variant="outlined"
+                    startIcon={
+                      isUpdatingEngine ? (
+                        <CircularProgress size={14} color="inherit" />
+                      ) : (
+                        <RefreshIcon fontSize="small" />
+                      )
+                    }
+                    onClick={handleUpdateEngine}
+                    disabled={isUpdatingEngine || isRollingBackEngine}
+                    sx={{ textTransform: 'none', fontWeight: 600 }}
+                  >
+                    {isUpdatingEngine ? t('engine.updating') : t('engine.updateButton')}
+                  </Button>
+                </Box>
+              )}
+
+              {/* Release channel selector (stable / nightly) */}
+              <Box sx={{ mt: 1.25 }}>
+                <FormControl fullWidth size="small">
+                  <InputLabel id="engine-channel-label">{t('engine.channelLabel')}</InputLabel>
+                  <Select
+                    labelId="engine-channel-label"
+                    value={settings.engineChannel ?? 'stable'}
+                    label={t('engine.channelLabel')}
+                    onChange={(e) =>
+                      handleEngineChannelChange(e.target.value as EngineChannel)
+                    }
+                  >
+                    <MenuItem value="stable">{t('engine.channelStable')}</MenuItem>
+                    <MenuItem value="nightly">{t('engine.channelNightly')}</MenuItem>
+                  </Select>
+                </FormControl>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: 'block', mt: 0.5, fontSize: '0.7rem', lineHeight: 1.35 }}
+                >
+                  {t('engine.channelHelp')}
+                </Typography>
+              </Box>
+
+              {/* Rollback to the binary backed up before the last update */}
+              {engineStatus?.canRollback && (
+                <Box sx={{ mt: 1 }}>
+                  <Button
+                    fullWidth
+                    size="small"
+                    variant="text"
+                    color="inherit"
+                    onClick={handleRollbackEngine}
+                    disabled={isUpdatingEngine || isRollingBackEngine}
+                    sx={{ textTransform: 'none', fontWeight: 600, fontSize: '0.78rem' }}
+                  >
+                    {t('engine.rollbackButton')}
+                  </Button>
+                </Box>
+              )}
+
+              {engineUpdateDone && (
+                <Alert severity="success" sx={{ mt: 1 }} onClose={() => setEngineUpdateDone(false)}>
+                  {t('engine.upToDate')}
+                </Alert>
+              )}
+              {engineUpdateError && (
+                <Alert severity="error" sx={{ mt: 1 }} onClose={() => setEngineUpdateError(null)}>
+                  {engineUpdateError}
+                </Alert>
+              )}
+            </Card>
+
+            {/* Cookie source: browser name only, no cookie data is ever read or stored */}
+            <Card variant="outlined" sx={{ p: 1.25 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel id="cookies-browser-label">{t('settings.cookies.label')}</InputLabel>
+                <Select
+                  labelId="cookies-browser-label"
+                  value={settings.cookiesFromBrowser ?? ''}
+                  label={t('settings.cookies.label')}
+                  onChange={(e) => handleCookiesChange(e.target.value)}
+                >
+                  <MenuItem value="">{t('settings.cookies.none')}</MenuItem>
+                  <MenuItem value="firefox">Firefox</MenuItem>
+                  <MenuItem value="chrome">Chrome</MenuItem>
+                  <MenuItem value="chromium">Chromium</MenuItem>
+                  <MenuItem value="brave">Brave</MenuItem>
+                  <MenuItem value="edge">Edge</MenuItem>
+                  <MenuItem value="vivaldi">Vivaldi</MenuItem>
+                  <MenuItem value="opera">Opera</MenuItem>
+                  <MenuItem value="safari">Safari</MenuItem>
+                  <MenuItem value="whale">Whale</MenuItem>
+                </Select>
+              </FormControl>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: 'block', mt: 0.75, fontSize: '0.7rem', lineHeight: 1.35 }}
+              >
+                {t('settings.cookies.helperText')}
+              </Typography>
+              {settings.cookiesFromBrowser === 'firefox' && (
+                <Typography variant="caption" color="success.main" sx={{ display: 'block', mt: 0.5, fontSize: '0.7rem' }}>
+                  {t('settings.cookies.firefoxHint')}
+                </Typography>
+              )}
+              {settings.cookiesFromBrowser &&
+                ['chrome', 'chromium', 'brave', 'edge', 'vivaldi'].includes(
+                  settings.cookiesFromBrowser,
+                ) && (
+                  <Typography variant="caption" color="warning.main" sx={{ display: 'block', mt: 0.5, fontSize: '0.7rem' }}>
+                    {t('settings.cookies.chromiumHint')}
+                  </Typography>
+                )}
+              {settings.cookiesFromBrowser === 'safari' && (
+                <Typography variant="caption" color="warning.main" sx={{ display: 'block', mt: 0.5, fontSize: '0.7rem' }}>
+                  {t('settings.cookies.safariHint')}
+                </Typography>
+              )}
             </Card>
 
             <Card variant="outlined" sx={{ p: 1.25 }}>
@@ -699,6 +878,63 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   variant="outlined"
                   sx={{ height: 22, fontSize: '0.75rem' }}
                 />
+              </Box>
+            </Card>
+
+            {/* JavaScript runtime used by yt-dlp for YouTube challenges */}
+            <Card variant="outlined" sx={{ p: 1.25 }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <Box>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {t('engine.jsRuntimeLabel')}
+                  </Typography>
+                  {health?.jsRuntime?.version ? (
+                    <Typography variant="caption" color="text.secondary" component="div">
+                      {t('jsRuntime.currentVersion')} : {health.jsRuntime.kind ?? ''}{' '}
+                      {health.jsRuntime.version}
+                    </Typography>
+                  ) : (
+                    <Typography variant="caption" color="text.secondary" component="div">
+                      {t('engine.jsRuntimeMissing')}
+                    </Typography>
+                  )}
+                </Box>
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  {!health?.jsRuntime?.isReady && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => onOpenJsRuntimeSetup?.()}
+                      sx={{ textTransform: 'none', fontWeight: 600, fontSize: '0.75rem' }}
+                    >
+                      {t('engine.jsRuntimeSetupButton')}
+                    </Button>
+                  )}
+                  <Chip
+                    size="small"
+                    icon={
+                      health?.jsRuntime?.isReady ? (
+                        <CheckCircleOutlineIcon fontSize="small" />
+                      ) : (
+                        <ErrorOutlineIcon fontSize="small" />
+                      )
+                    }
+                    label={
+                      health?.jsRuntime?.isReady
+                        ? t('settings.diagnostics.ready')
+                        : t('settings.diagnostics.unavailable')
+                    }
+                    color={health?.jsRuntime?.isReady ? 'success' : 'warning'}
+                    variant="outlined"
+                    sx={{ height: 22, fontSize: '0.75rem' }}
+                  />
+                </Stack>
               </Box>
             </Card>
           </Stack>

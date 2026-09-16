@@ -10,5 +10,12 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
     /// Probes media metadata for a validated URL.
-    async fn probe(&self, url: &MediaUrl) -> Result<ProbeResult, CoreError>;
+    ///
+    /// `cancellation_token` allows the caller to abort the underlying probe
+    /// (e.g. killing the external process) as soon as the operation becomes moot.
+    async fn probe(
+        &self,
+        url: &MediaUrl,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<ProbeResult, CoreError>;
 }

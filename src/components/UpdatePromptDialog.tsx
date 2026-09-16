@@ -66,8 +66,9 @@ export const UpdatePromptDialog: React.FC<UpdatePromptDialogProps> = ({
       await client.restartApp();
     } catch (err) {
       console.error('Failed to restart app:', err);
+      setError(err instanceof Error ? err.message : t('help.updater.error'));
     }
-  }, [client]);
+  }, [client, t]);
 
   if (!updateInfo) return null;
 

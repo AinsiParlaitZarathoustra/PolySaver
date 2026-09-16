@@ -7,6 +7,7 @@ pub mod history_repository;
 pub mod media_downloader;
 pub mod media_inspector;
 pub mod media_provider;
+pub mod playlist_detector;
 pub mod settings_repository;
 
 pub use converter::{
@@ -19,4 +20,5 @@ pub use media_downloader::{
 };
 pub use media_inspector::{MediaInspector, MediaStreamInfo};
 pub use media_provider::MediaProvider;
+pub use playlist_detector::{PlaylistDetection, PlaylistDetector};
 pub use settings_repository::SettingsRepository;

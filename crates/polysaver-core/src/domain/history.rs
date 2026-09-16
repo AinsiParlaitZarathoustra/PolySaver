@@ -65,6 +65,51 @@ pub struct DownloadHistoryEntry {
     preset: DownloadPreset,
     destination_path: String,
     completed_at: u64,
+    /// Download directory this entry was written into.
+    /// Optional for backward compatibility with entries created before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    download_dir: Option<String>,
+}
+
+/// Maximum accepted length for a persisted destination path.
+const MAX_DESTINATION_PATH_BYTES: usize = 4096;
+
+/// Validates a destination path from untrusted input.
+///
+/// Rules: non-empty, absolute, no null bytes, no `..` traversal component,
+/// bounded length.
+fn validate_destination_path(raw: &str) -> Result<String, CoreError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::ValidationError(
+            "Destination path cannot be empty in history entry".to_string(),
+        ));
+    }
+    if trimmed.contains('\0') {
+        return Err(CoreError::ValidationError(
+            "Destination path cannot contain null bytes".to_string(),
+        ));
+    }
+    if trimmed.len() > MAX_DESTINATION_PATH_BYTES {
+        return Err(CoreError::ValidationError(
+            "Destination path is too long".to_string(),
+        ));
+    }
+    let path = std::path::Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err(CoreError::ValidationError(
+            "Destination path must be absolute".to_string(),
+        ));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(CoreError::ValidationError(
+            "Destination path cannot contain '..' components".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 impl DownloadHistoryEntry {
@@ -77,37 +122,38 @@ impl DownloadHistoryEntry {
         destination_path: String,
         completed_at: Option<u64>,
     ) -> Result<Self, CoreError> {
-        let sanitized_title = title.trim();
-        let final_title = if sanitized_title.is_empty() {
-            "PolySaver_Media".to_string()
-        } else {
-            sanitized_title.to_string()
-        };
-
-        let trimmed_dest = destination_path.trim();
-        if trimmed_dest.is_empty() {
-            return Err(CoreError::ValidationError(
-                "Destination path cannot be empty in history entry".to_string(),
-            ));
-        }
-
-        let timestamp = match completed_at {
-            Some(ts) => ts,
-            None => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-        };
-
-        Ok(Self {
-            id: HistoryEntryId::new(),
+        Self::build(
+            HistoryEntryId::new(),
             download_id,
             source_url,
-            title: final_title,
+            title,
             preset,
-            destination_path: trimmed_dest.to_string(),
-            completed_at: timestamp,
-        })
+            destination_path,
+            completed_at,
+            None,
+        )
+    }
+
+    /// Creates a new validated history entry that remembers its download directory.
+    pub fn new_with_dir(
+        download_id: DownloadId,
+        source_url: MediaUrl,
+        title: String,
+        preset: DownloadPreset,
+        destination_path: String,
+        completed_at: Option<u64>,
+        download_dir: String,
+    ) -> Result<Self, CoreError> {
+        Self::build(
+            HistoryEntryId::new(),
+            download_id,
+            source_url,
+            title,
+            preset,
+            destination_path,
+            completed_at,
+            Some(download_dir),
+        )
     }
 
     /// Reconstructs a history entry with an existing ID (used by repository deserializers).
@@ -120,6 +166,53 @@ impl DownloadHistoryEntry {
         destination_path: String,
         completed_at: u64,
     ) -> Result<Self, CoreError> {
+        Self::build(
+            id,
+            download_id,
+            source_url,
+            title,
+            preset,
+            destination_path,
+            Some(completed_at),
+            None,
+        )
+    }
+
+    /// Reconstructs a history entry including its recorded download directory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconstruct_with_dir(
+        id: HistoryEntryId,
+        download_id: DownloadId,
+        source_url: MediaUrl,
+        title: String,
+        preset: DownloadPreset,
+        destination_path: String,
+        completed_at: u64,
+        download_dir: Option<String>,
+    ) -> Result<Self, CoreError> {
+        Self::build(
+            id,
+            download_id,
+            source_url,
+            title,
+            preset,
+            destination_path,
+            Some(completed_at),
+            download_dir,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        id: HistoryEntryId,
+        download_id: DownloadId,
+        source_url: MediaUrl,
+        title: String,
+        preset: DownloadPreset,
+        destination_path: String,
+        completed_at: Option<u64>,
+        download_dir: Option<String>,
+    ) -> Result<Self, CoreError> {
         let sanitized_title = title.trim();
         let final_title = if sanitized_title.is_empty() {
             "PolySaver_Media".to_string()
@@ -127,12 +220,20 @@ impl DownloadHistoryEntry {
             sanitized_title.to_string()
         };
 
-        let trimmed_dest = destination_path.trim();
-        if trimmed_dest.is_empty() {
-            return Err(CoreError::ValidationError(
-                "Destination path cannot be empty in history entry".to_string(),
-            ));
-        }
+        let validated_dest = validate_destination_path(&destination_path)?;
+
+        let timestamp = match completed_at {
+            Some(ts) => ts,
+            None => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        };
+
+        let validated_dir = match download_dir {
+            Some(dir) => Some(validate_destination_path(&dir)?),
+            None => None,
+        };
 
         Ok(Self {
             id,
@@ -140,8 +241,9 @@ impl DownloadHistoryEntry {
             source_url,
             title: final_title,
             preset,
-            destination_path: trimmed_dest.to_string(),
-            completed_at,
+            destination_path: validated_dest,
+            completed_at: timestamp,
+            download_dir: validated_dir,
         })
     }
 
@@ -178,5 +280,10 @@ impl DownloadHistoryEntry {
     /// Returns the completion timestamp in unix milliseconds.
     pub fn completed_at(&self) -> u64 {
         self.completed_at
+    }
+
+    /// Returns the recorded download directory, when known.
+    pub fn download_dir(&self) -> Option<&str> {
+        self.download_dir.as_deref()
     }
 }

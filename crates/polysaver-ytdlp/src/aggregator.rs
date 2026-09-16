@@ -3,169 +3,277 @@
 
 //! # Multi-Stream Progress Aggregator
 //!
-//! Aggregates multi-stream (video + audio) download progress without artificial resets or jumps.
-//! Produces strictly monotonic 0..100% progress weighted by stream sizes or stream counts.
+//! Aggregates the progress of the *sequential* streams yt-dlp downloads for a
+//! single job (e.g. `bestvideo+bestaudio` downloads video, then audio). Each
+//! stream reports its own `downloaded`/`total`, so the aggregator commits a
+//! stream when its identifier changes and reports a global percentage computed
+//! from committed + current bytes.
+//!
+//! Guarantees:
+//! - monotonic percentage (never goes backwards),
+//! - 100% is never emitted before [`MultiStreamProgressAggregator::finish`],
+//! - `None` percentage while totals are unknown (instead of a fake value).
 
 use polysaver_core::ports::media_downloader::StreamProgress;
-use std::collections::HashMap;
 
-/// Individual stream progress snapshot.
+/// State of the stream currently being downloaded.
 #[derive(Debug, Clone)]
 struct StreamState {
-    percent: f64,
-    downloaded_bytes: u64,
-    total_bytes: Option<u64>,
-    weight: f64,
+    id: String,
+    downloaded: u64,
+    total: Option<u64>,
+    is_estimate: bool,
 }
 
-/// Multi-stream progress aggregator ensuring monotonic global progress.
-#[derive(Debug)]
+/// Multi-stream progress aggregator following yt-dlp's real sequential behavior.
+#[derive(Debug, Default)]
 pub struct MultiStreamProgressAggregator {
-    streams: HashMap<String, StreamState>,
-    stream_order: Vec<String>,
-    expected_stream_count: usize,
+    /// Sum of `downloaded` over streams already committed.
+    completed_bytes: u64,
+    /// Sum of `total` over streams already committed (unknown totals count 0).
+    completed_total: u64,
+    /// Whether every committed stream had a known total.
+    completed_totals_known: bool,
+    /// Stream currently being reported.
+    current: Option<StreamState>,
+    /// Stream metadata announced by `before_dl` (id -> advertised size).
+    registered: Vec<(String, Option<u64>)>,
+    /// Streams already started (so registered sizes are not double counted as pending).
+    seen_ids: Vec<String>,
+    /// Last percentage emitted, enforcing monotonicity.
     last_emitted_percent: u8,
-    total_known_bytes: Option<u64>,
 }
 
 impl MultiStreamProgressAggregator {
-    /// Creates a new aggregator with an expected number of streams.
+    /// Creates an empty aggregator. Streams are learned as they report progress.
     #[must_use]
-    pub fn new(expected_stream_count: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            streams: HashMap::new(),
-            stream_order: Vec::new(),
-            expected_stream_count: expected_stream_count.max(1),
+            completed_bytes: 0,
+            completed_total: 0,
+            completed_totals_known: true,
+            current: None,
+            registered: Vec::new(),
+            seen_ids: Vec::new(),
             last_emitted_percent: 0,
-            total_known_bytes: None,
         }
     }
 
-    /// Registers stream metadata (e.g. from before_dl header).
+    /// Registers stream metadata from the `before_dl` header (weighting source).
     pub fn register_stream_size(&mut self, stream_id: &str, size_bytes: Option<u64>) {
-        if !self.streams.contains_key(stream_id) {
-            self.stream_order.push(stream_id.to_string());
-            self.streams.insert(
-                stream_id.to_string(),
-                StreamState {
-                    percent: 0.0,
-                    downloaded_bytes: 0,
-                    total_bytes: size_bytes,
-                    weight: 1.0,
-                },
-            );
-            self.recompute_weights();
+        if !self.registered.iter().any(|(id, _)| id == stream_id) {
+            self.registered
+                .push((stream_id.to_string(), size_bytes.filter(|s| *s > 0)));
         }
     }
 
-    /// Recomputes weights across all known streams.
-    fn recompute_weights(&mut self) {
-        let all_have_sizes = !self.streams.is_empty()
-            && self
-                .streams
-                .values()
-                .all(|s| s.total_bytes.is_some() && s.total_bytes.unwrap() > 0);
+    /// Returns the size advertised for a stream, if any.
+    fn registered_size(&self, id: &str) -> Option<u64> {
+        self.registered
+            .iter()
+            .find(|(rid, _)| rid == id)
+            .and_then(|(_, size)| *size)
+    }
 
-        if all_have_sizes {
-            let total: u64 = self.streams.values().filter_map(|s| s.total_bytes).sum();
-            self.total_known_bytes = Some(total);
-            if total > 0 {
-                for state in self.streams.values_mut() {
-                    let s_bytes = state.total_bytes.unwrap_or(0);
-                    state.weight = (s_bytes as f64) / (total as f64);
-                }
-                return;
+    /// Commits the current stream into the completed counters.
+    fn commit_current(&mut self) {
+        if let Some(state) = self.current.take() {
+            self.completed_bytes = self.completed_bytes.saturating_add(state.downloaded);
+            let total = state
+                .total
+                .or_else(|| self.registered_size(&state.id))
+                .unwrap_or(state.downloaded);
+            self.completed_total = self.completed_total.saturating_add(total);
+            if state.total.is_none() && self.registered_size(&state.id).is_none() {
+                // Total unknown and not advertised: cannot trust future percentages
+                // that depend on this stream's total.
+                self.completed_totals_known = false;
             }
-        }
-
-        // Fallback: equal weight distribution
-        let count = self.streams.len().max(self.expected_stream_count).max(1);
-        let equal_weight = 1.0 / (count as f64);
-        for state in self.streams.values_mut() {
-            state.weight = equal_weight;
         }
     }
 
-    /// Feeds a stream progress event and returns the aggregated global progress.
-    pub fn feed(&mut self, stream_id: Option<&str>, parsed: &StreamProgress) -> StreamProgress {
-        let key = stream_id
-            .unwrap_or_else(|| {
-                self.stream_order
-                    .first()
-                    .map(|s| s.as_str())
-                    .unwrap_or("default")
-            })
-            .to_string();
+    /// Feeds a parsed progress event and returns the aggregated global progress.
+    ///
+    /// `stream_id` identifies the stream in yt-dlp's output (`%(info.format_id)s`).
+    /// `status_finished` is true when the line reports `status:finished`.
+    pub fn feed_with_status(
+        &mut self,
+        stream_id: Option<&str>,
+        parsed: &StreamProgress,
+        status_finished: bool,
+    ) -> StreamProgress {
+        let key = stream_id.map(str::to_string);
 
-        if !self.streams.contains_key(&key) {
-            self.stream_order.push(key.clone());
-            self.streams.insert(
-                key.clone(),
-                StreamState {
-                    percent: 0.0,
-                    downloaded_bytes: 0,
-                    total_bytes: parsed.total_bytes,
-                    weight: 1.0,
-                },
-            );
-            self.recompute_weights();
+        match (&self.current, key.as_deref()) {
+            // Stream change: commit the previous one and start the new one.
+            (Some(current), Some(new_id)) if current.id != new_id => {
+                self.commit_current();
+                self.start_stream(new_id);
+            }
+            (None, Some(new_id)) => {
+                self.start_stream(new_id);
+            }
+            _ => {}
         }
 
-        if let Some(state) = self.streams.get_mut(&key) {
-            if let Some(pct) = parsed.percent {
-                state.percent = (pct as f64).clamp(state.percent, 100.0);
-            }
+        if self.current.is_none() {
+            // No identifier at all: use a synthetic single stream.
+            self.start_stream("default");
+        }
+
+        if let Some(current) = self.current.as_mut() {
             if let Some(dl) = parsed.downloaded_bytes {
-                state.downloaded_bytes = dl.max(state.downloaded_bytes);
+                // downloaded_bytes is monotonic per stream, but guard anyway.
+                current.downloaded = dl.max(current.downloaded);
             }
-            if state.total_bytes.is_none() && parsed.total_bytes.is_some() {
-                state.total_bytes = parsed.total_bytes;
+            // An exact total always wins over a previously stored estimate.
+            if let Some(t) = parsed.total_bytes.filter(|t| *t > 0) {
+                if current.total.is_none() || current.is_estimate {
+                    current.total = Some(t);
+                    current.is_estimate = false;
+                }
+            }
+            if current.total.is_none() {
+                // Fall back to the estimate only when no exact total exists.
+                if let Some(t) = parsed.total_bytes_estimate.filter(|t| *t > 0) {
+                    // Estimates are not monotonic; keep the highest observed one
+                    // to avoid regressions in the computed percentage.
+                    let keep = match current.total {
+                        Some(p) if p >= t => Some(p),
+                        _ => Some(t),
+                    };
+                    current.total = keep;
+                    current.is_estimate = true;
+                }
+            }
+            // A finished stream is complete by definition: its real total is
+            // whatever was downloaded, which also rescues streams with no total.
+            if status_finished && current.downloaded > 0 {
+                current.total = Some(current.downloaded);
+                current.is_estimate = false;
             }
         }
 
-        // Calculate weighted percentage
-        let mut aggregated_percent: f64 = 0.0;
-        let mut total_downloaded: u64 = 0;
-        let mut total_bytes_sum: u64 = 0;
-        let mut all_totals_known = true;
-
-        for state in self.streams.values() {
-            aggregated_percent += state.weight * state.percent;
-            total_downloaded += state.downloaded_bytes;
-            if let Some(t) = state.total_bytes {
-                total_bytes_sum += t;
-            } else {
-                all_totals_known = false;
-            }
-        }
-
-        let rounded_pct = aggregated_percent.round().clamp(0.0, 100.0) as u8;
-        let monotonic_pct = rounded_pct.max(self.last_emitted_percent);
-        self.last_emitted_percent = monotonic_pct;
+        let percent = self.compute_percent();
+        let downloaded = self.completed_bytes + self.current.as_ref().map_or(0, |c| c.downloaded);
+        let total = self.compute_total();
 
         StreamProgress {
-            percent: Some(monotonic_pct),
-            downloaded_bytes: if total_downloaded > 0 {
-                Some(total_downloaded)
-            } else {
-                parsed.downloaded_bytes
-            },
-            total_bytes: if all_totals_known && total_bytes_sum > 0 {
-                Some(total_bytes_sum)
-            } else {
-                parsed.total_bytes
-            },
+            percent: Some(percent),
+            downloaded_bytes: Some(downloaded),
+            total_bytes: total,
+            total_bytes_estimate: None,
             speed_bytes_per_second: parsed.speed_bytes_per_second,
         }
     }
 
-    /// Marks completion of all streams at exactly 100%.
+    /// Convenience wrapper for callers without status information.
+    pub fn feed(&mut self, stream_id: Option<&str>, parsed: &StreamProgress) -> StreamProgress {
+        self.feed_with_status(stream_id, parsed, false)
+    }
+
+    fn start_stream(&mut self, id: &str) {
+        if !self.seen_ids.iter().any(|s| s == id) {
+            self.seen_ids.push(id.to_string());
+        }
+        self.current = Some(StreamState {
+            id: id.to_string(),
+            downloaded: 0,
+            total: self.registered_size(id),
+            is_estimate: false,
+        });
+    }
+
+    /// Sum of advertised sizes for registered streams not started yet.
+    ///
+    /// Including them in the denominator keeps the percentage meaningful (and
+    /// monotonic) while the first of several streams is still running.
+    fn pending_registered_total(&self) -> Option<u64> {
+        let mut total = 0u64;
+        for (id, size) in &self.registered {
+            if self.seen_ids.iter().any(|s| s == id) {
+                continue;
+            }
+            // A pending stream without an advertised size makes the global
+            // total unknowable, so no percentage should be claimed.
+            total = total.saturating_add((*size)?);
+        }
+        Some(total)
+    }
+
+    /// Computes the global percentage, or the last value while it cannot be trusted.
+    ///
+    /// The returned value never exceeds 99 until [`Self::finish`] is called, and
+    /// never decreases.
+    fn compute_percent(&mut self) -> u8 {
+        if !self.completed_totals_known {
+            return self.last_emitted_percent;
+        }
+
+        let current = match self.current.as_ref() {
+            Some(c) => c,
+            None => return self.last_emitted_percent,
+        };
+
+        let current_total = match current.total {
+            Some(t) if t > 0 => t,
+            _ => return self.last_emitted_percent,
+        };
+
+        let pending = match self.pending_registered_total() {
+            Some(p) => p,
+            None => return self.last_emitted_percent,
+        };
+
+        let grand_total = self
+            .completed_total
+            .saturating_add(current_total)
+            .saturating_add(pending);
+        if grand_total == 0 {
+            return self.last_emitted_percent;
+        }
+        let grand_downloaded = self.completed_bytes.saturating_add(current.downloaded);
+
+        let raw = ((grand_downloaded as f64 / grand_total as f64) * 100.0).round();
+        let capped = raw.clamp(0.0, 99.0) as u8;
+        let monotonic = capped.max(self.last_emitted_percent);
+        self.last_emitted_percent = monotonic;
+        monotonic
+    }
+
+    /// Returns `completed_total + current.total + pending registered totals` when fully known.
+    fn compute_total(&self) -> Option<u64> {
+        if !self.completed_totals_known {
+            return None;
+        }
+        let current = self.current.as_ref()?;
+        let current_total = current.total?;
+        let pending = self.pending_registered_total()?;
+        Some(
+            self.completed_total
+                .saturating_add(current_total)
+                .saturating_add(pending),
+        )
+    }
+
+    /// Marks completion: returns exactly 100% with the final byte counts.
     #[must_use]
     pub fn finish(&self) -> StreamProgress {
+        let downloaded = self.completed_bytes + self.current.as_ref().map_or(0, |c| c.downloaded);
+        let total = self.compute_total().or(if downloaded > 0 {
+            Some(downloaded)
+        } else {
+            None
+        });
         StreamProgress {
             percent: Some(100),
-            downloaded_bytes: self.total_known_bytes,
-            total_bytes: self.total_known_bytes,
+            downloaded_bytes: if downloaded > 0 {
+                Some(downloaded)
+            } else {
+                None
+            },
+            total_bytes: total,
+            total_bytes_estimate: None,
             speed_bytes_per_second: None,
         }
     }
@@ -175,142 +283,142 @@ impl MultiStreamProgressAggregator {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_single_stream_progress_monotonicity() {
-        let mut agg = MultiStreamProgressAggregator::new(1);
-        let p1 = agg.feed(
-            Some("stream1"),
-            &StreamProgress {
-                percent: Some(20),
-                downloaded_bytes: Some(200),
-                total_bytes: Some(1000),
-                speed_bytes_per_second: Some(500),
-            },
-        );
-        assert_eq!(p1.percent, Some(20));
-
-        // Duplicate or lower percent cannot regress
-        let p2 = agg.feed(
-            Some("stream1"),
-            &StreamProgress {
-                percent: Some(15),
-                downloaded_bytes: Some(200),
-                total_bytes: Some(1000),
-                speed_bytes_per_second: Some(500),
-            },
-        );
-        assert_eq!(p2.percent, Some(20));
+    fn progress(downloaded: u64, total: Option<u64>, est: Option<u64>) -> StreamProgress {
+        StreamProgress {
+            percent: None,
+            downloaded_bytes: Some(downloaded),
+            total_bytes: total,
+            total_bytes_estimate: est,
+            speed_bytes_per_second: Some(1_000_000),
+        }
     }
 
+    /// Single stream (audio preset): 0 -> 100%, correct totals.
     #[test]
-    fn test_dual_stream_equal_weight_progress() {
-        let mut agg = MultiStreamProgressAggregator::new(2);
-        agg.register_stream_size("video", None);
-        agg.register_stream_size("audio", None);
+    fn test_single_stream_audio_preset() {
+        let mut agg = MultiStreamProgressAggregator::new();
+        agg.register_stream_size("140", Some(5_000_000));
 
-        // Stream 1 (video) 0 -> 100%
-        let p1 = agg.feed(
-            Some("video"),
-            &StreamProgress {
-                percent: Some(50),
-                downloaded_bytes: None,
-                total_bytes: None,
-                speed_bytes_per_second: None,
-            },
-        );
-        // 50% * 0.5 = 25%
-        assert_eq!(p1.percent, Some(25));
+        let p1 = agg.feed_with_status(Some("140"), &progress(0, Some(5_000_000), None), false);
+        assert_eq!(p1.percent, Some(0));
+        assert_eq!(p1.downloaded_bytes, Some(0));
+        assert_eq!(p1.total_bytes, Some(5_000_000));
 
-        let p2 = agg.feed(
-            Some("video"),
-            &StreamProgress {
-                percent: Some(100),
-                downloaded_bytes: None,
-                total_bytes: None,
-                speed_bytes_per_second: None,
-            },
+        let p2 = agg.feed_with_status(
+            Some("140"),
+            &progress(2_500_000, Some(5_000_000), None),
+            false,
         );
-        // 100% * 0.5 = 50%
         assert_eq!(p2.percent, Some(50));
+        assert_eq!(p2.downloaded_bytes, Some(2_500_000));
 
-        // Stream 2 (audio) starts at 0% - global progress must not drop below 50%
-        let p3 = agg.feed(
-            Some("audio"),
-            &StreamProgress {
-                percent: Some(0),
-                downloaded_bytes: None,
-                total_bytes: None,
-                speed_bytes_per_second: None,
-            },
-        );
-        assert_eq!(p3.percent, Some(50));
-
-        // Stream 2 reaches 100% -> global 100%
-        let p4 = agg.feed(
-            Some("audio"),
-            &StreamProgress {
-                percent: Some(100),
-                downloaded_bytes: None,
-                total_bytes: None,
-                speed_bytes_per_second: None,
-            },
-        );
-        assert_eq!(p4.percent, Some(100));
+        let finished = agg.finish();
+        assert_eq!(finished.percent, Some(100));
+        assert_eq!(finished.downloaded_bytes, Some(2_500_000));
     }
 
+    /// Two streams with known sizes: switching to stream 2 never goes backwards.
     #[test]
-    fn test_dual_stream_unequal_sizes_weighted() {
-        let mut agg = MultiStreamProgressAggregator::new(2);
-        // Video: 80 MB, Audio: 20 MB -> Total: 100 MB (weights: 0.8 and 0.2)
-        agg.register_stream_size("video", Some(80_000_000));
-        agg.register_stream_size("audio", Some(20_000_000));
+    fn test_two_streams_switch_never_regresses() {
+        let mut agg = MultiStreamProgressAggregator::new();
+        agg.register_stream_size("137", Some(80_000_000));
+        agg.register_stream_size("140", Some(20_000_000));
 
-        // Video at 50% -> 50% * 0.8 = 40%
-        let p1 = agg.feed(
-            Some("video"),
-            &StreamProgress {
-                percent: Some(50),
-                downloaded_bytes: Some(40_000_000),
-                total_bytes: Some(80_000_000),
-                speed_bytes_per_second: None,
-            },
+        // Video reaches 100% of its own span; global must stay below 100.
+        let p1 = agg.feed_with_status(
+            Some("137"),
+            &progress(80_000_000, Some(80_000_000), None),
+            true,
         );
-        assert_eq!(p1.percent, Some(40));
+        assert_eq!(p1.percent, Some(80));
+        assert!(p1.percent.unwrap() < 100, "must not hit 100% mid-way");
 
-        // Video complete (100% * 0.8 = 80%)
-        let p2 = agg.feed(
-            Some("video"),
-            &StreamProgress {
-                percent: Some(100),
-                downloaded_bytes: Some(80_000_000),
-                total_bytes: Some(80_000_000),
-                speed_bytes_per_second: None,
-            },
-        );
+        // Audio starts: previous 80 MB is committed, audio contributes 0.
+        let p2 = agg.feed_with_status(Some("140"), &progress(0, Some(20_000_000), None), false);
         assert_eq!(p2.percent, Some(80));
+        assert_eq!(p2.downloaded_bytes, Some(80_000_000));
 
-        // Audio at 50% -> 80% + (50% * 0.2) = 90%
-        let p3 = agg.feed(
-            Some("audio"),
-            &StreamProgress {
-                percent: Some(50),
-                downloaded_bytes: Some(10_000_000),
-                total_bytes: Some(20_000_000),
-                speed_bytes_per_second: None,
-            },
+        // Audio at 50% -> 90% globally.
+        let p3 = agg.feed_with_status(
+            Some("140"),
+            &progress(10_000_000, Some(20_000_000), None),
+            false,
         );
         assert_eq!(p3.percent, Some(90));
 
-        // Audio complete -> 100%
-        let p4 = agg.feed(
-            Some("audio"),
-            &StreamProgress {
-                percent: Some(100),
-                downloaded_bytes: Some(20_000_000),
-                total_bytes: Some(20_000_000),
-                speed_bytes_per_second: None,
-            },
+        // Audio at 100% of its span: still capped below 100 until finish().
+        let p4 = agg.feed_with_status(
+            Some("140"),
+            &progress(20_000_000, Some(20_000_000), None),
+            true,
         );
-        assert_eq!(p4.percent, Some(100));
+        assert_eq!(p4.percent, Some(99));
+
+        assert_eq!(agg.finish().percent, Some(100));
+    }
+
+    /// HLS stream where `total_bytes_estimate` is not monotonic.
+    #[test]
+    fn test_hls_estimate_non_monotonic_stays_monotonic() {
+        let mut agg = MultiStreamProgressAggregator::new();
+
+        let p1 = agg.feed_with_status(None, &progress(1_000_000, None, Some(10_000_000)), false);
+        let first = p1.percent.unwrap();
+
+        // Estimate shrinks (over-estimation corrected by yt-dlp); percent must not drop.
+        let p2 = agg.feed_with_status(None, &progress(2_000_000, None, Some(6_000_000)), false);
+        assert!(p2.percent.unwrap() >= first);
+
+        // Estimate grows again.
+        let p3 = agg.feed_with_status(None, &progress(3_000_000, None, Some(12_000_000)), false);
+        assert!(p3.percent.unwrap() >= p2.percent.unwrap());
+
+        // Downloaded bytes only increase.
+        assert!(p3.downloaded_bytes.unwrap() >= p2.downloaded_bytes.unwrap());
+    }
+
+    /// Unknown total: no percentage is fabricated.
+    #[test]
+    fn test_unknown_total_emits_no_percent() {
+        let mut agg = MultiStreamProgressAggregator::new();
+        let p = agg.feed_with_status(None, &progress(1_234_567, None, None), false);
+        assert_eq!(p.percent, Some(0));
+        assert_eq!(p.downloaded_bytes, Some(1_234_567));
+        assert_eq!(p.total_bytes, None);
+
+        let finished = agg.finish();
+        assert_eq!(finished.percent, Some(100));
+        assert_eq!(finished.downloaded_bytes, Some(1_234_567));
+    }
+
+    /// `finish()` always reports exactly 100%.
+    #[test]
+    fn test_finish_reports_exactly_100() {
+        let mut agg = MultiStreamProgressAggregator::new();
+        let _ = agg.feed_with_status(Some("137"), &progress(1, Some(100), None), false);
+        assert_eq!(agg.finish().percent, Some(100));
+
+        let empty = MultiStreamProgressAggregator::new();
+        assert_eq!(empty.finish().percent, Some(100));
+    }
+
+    /// Estimates must not overwrite a known exact total.
+    #[test]
+    fn test_estimate_never_overrides_exact_total() {
+        let mut agg = MultiStreamProgressAggregator::new();
+        let p1 = agg.feed_with_status(None, &progress(500, Some(1000), Some(10_000)), false);
+        assert_eq!(p1.total_bytes, Some(1000));
+        let p2 = agg.feed_with_status(None, &progress(800, Some(1000), None), false);
+        assert_eq!(p2.percent, Some(80));
+    }
+
+    /// Exact totals are kept when they arrive after an estimate.
+    #[test]
+    fn test_exact_total_replaces_estimate() {
+        let mut agg = MultiStreamProgressAggregator::new();
+        let _ = agg.feed_with_status(None, &progress(500, None, Some(10_000)), false);
+        let p2 = agg.feed_with_status(None, &progress(800, Some(2_000), None), false);
+        assert_eq!(p2.total_bytes, Some(2_000));
+        assert_eq!(p2.percent, Some(40));
     }
 }

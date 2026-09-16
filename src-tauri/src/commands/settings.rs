@@ -30,8 +30,12 @@ pub async fn set_settings(
         .save(&validated)
         .await
         .map_err(IpcError::from)?;
+
+    // Apply yt-dlp-affecting settings to the live adapter immediately.
     state
-        .start_download_service
-        .set_max_concurrent(validated.effective_max_concurrent());
+        .ytdlp_downloader
+        .set_cookies_from_browser(validated.cookies_from_browser())
+        .await;
+
     Ok(AppSettingsDto::from(&validated))
 }

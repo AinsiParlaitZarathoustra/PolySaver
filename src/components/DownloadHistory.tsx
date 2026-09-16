@@ -24,11 +24,14 @@ import { defaultIpcClient } from '../ipc/client';
 interface DownloadHistoryProps {
   entries: DownloadHistoryEntryDto[];
   onRemoveEntry: (id: string) => Promise<void>;
+  /** Surfaces action failures to the app-level toast instead of console-only. */
+  onError?: (message: string) => void;
 }
 
 export const DownloadHistory: React.FC<DownloadHistoryProps> = ({
   entries,
   onRemoveEntry,
+  onError,
 }) => {
   const { t } = useTranslation();
 
@@ -47,6 +50,7 @@ export const DownloadHistory: React.FC<DownloadHistoryProps> = ({
           key={entry.id}
           entry={entry}
           onRemove={() => onRemoveEntry(entry.id)}
+          onError={onError}
         />
       ))}
     </Stack>
@@ -56,7 +60,8 @@ export const DownloadHistory: React.FC<DownloadHistoryProps> = ({
 const DownloadHistoryCard: React.FC<{
   entry: DownloadHistoryEntryDto;
   onRemove: () => void;
-}> = ({ entry, onRemove }) => {
+  onError?: (message: string) => void;
+}> = ({ entry, onRemove, onError }) => {
   const { t } = useTranslation();
 
   const isVideo =
@@ -77,6 +82,7 @@ const DownloadHistoryCard: React.FC<{
       await defaultIpcClient.revealHistoryFile(entry.id);
     } catch (err) {
       console.error('Failed to reveal history file:', err);
+      onError?.(t('errors.OUTPUT_FILE_NOT_FOUND'));
     }
   };
 
@@ -85,6 +91,7 @@ const DownloadHistoryCard: React.FC<{
       await defaultIpcClient.openHistoryFile(entry.id);
     } catch (err) {
       console.error('Failed to open history file:', err);
+      onError?.(t('errors.OUTPUT_FILE_NOT_FOUND'));
     }
   };
 
@@ -94,6 +101,7 @@ const DownloadHistoryCard: React.FC<{
       await defaultIpcClient.openHistorySourceUrl(entry.id);
     } catch (err) {
       console.error('Failed to open history source URL:', err);
+      onError?.(t('errors.SOURCE_URL_INVALID'));
     }
   };
 

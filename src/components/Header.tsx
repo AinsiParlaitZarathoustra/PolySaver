@@ -34,20 +34,47 @@ export const Header: React.FC<HeaderProps> = ({ onOpenSettings, onOpenHelp }) =>
         backdropFilter: 'blur(8px)',
       }}
     >
-      <Toolbar sx={{ justifyContent: 'space-between', px: { xs: 2, sm: 3 } }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+      <Toolbar
+        sx={{
+          position: 'relative',
+          justifyContent: 'flex-end',
+          minHeight: { xs: 72, sm: 88 },
+          px: { xs: 2, sm: 3 },
+        }}
+      >
+        {/* Centered brand block: title + logo, enlarged and not interactive */}
+        <Box
+          sx={{
+            position: 'absolute',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: { xs: 1.5, sm: 2 },
+            pointerEvents: 'none',
+          }}
+        >
           <Box
             component="img"
             src={logoIcon}
             alt={t('common.appName')}
             sx={{
-              width: { xs: 32, sm: 36 },
-              height: { xs: 32, sm: 36 },
+              width: { xs: 44, sm: 56 },
+              height: { xs: 44, sm: 56 },
               objectFit: 'contain',
               display: 'block',
             }}
           />
-          <Typography variant="h6" component="div" sx={{ fontWeight: 700 }}>
+          <Typography
+            component="div"
+            sx={{
+              fontWeight: 800,
+              letterSpacing: '-0.02em',
+              fontSize: { xs: '1.6rem', sm: '2.125rem' },
+              lineHeight: 1.1,
+              whiteSpace: 'nowrap',
+            }}
+          >
             {t('common.appName')}
           </Typography>
         </Box>

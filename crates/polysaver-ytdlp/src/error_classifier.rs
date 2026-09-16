@@ -7,6 +7,31 @@
 
 use polysaver_core::error::{DownloadErrorCode, DownloadErrorDetails};
 
+/// Case-insensitive patterns indicating the local yt-dlp engine is outdated or
+/// its extractors fail in ways upstream attributes to stale releases.
+/// Kept as a shared list so the same detection is used for hard failures *and*
+/// for non-fatal `WARNING:` lines emitted on successful runs.
+pub const OUTDATED_ENGINE_PATTERNS: &[&str] = &[
+    "is older than 90 days",
+    "strongly recommended to always use the latest version",
+    "confirm you are on the latest version",
+    "signature solving failed",
+    "nsig extraction failed",
+    "n challenge solving failed",
+    "unable to extract yt initial data",
+    "failed to extract any player response",
+    "yt-dlp is outdated",
+    "update yt-dlp",
+];
+
+/// Returns whether the given text (stderr lines joined or a single line)
+/// mentions an outdated-engine condition.
+#[must_use]
+pub fn is_outdated_engine_message(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    OUTDATED_ENGINE_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 /// Classifies a process execution failure into structured `DownloadErrorDetails`.
 #[must_use]
 pub fn classify_ytdlp_error(
@@ -35,6 +60,11 @@ pub fn classify_ytdlp_error(
         || lower.contains("blocked on copyright grounds")
         || lower.contains("premiere will begin")
         || lower.contains("this live stream has ended")
+        || lower.contains("does not exist")
+        || lower.contains("playlist does not exist")
+        || lower.contains("this playlist is private")
+        || lower.contains("unviewable")
+        || lower.contains("inaccessible")
     {
         DownloadErrorCode::VideoUnavailable
     } else if lower.contains("sign in to confirm your age")
@@ -69,7 +99,7 @@ pub fn classify_ytdlp_error(
         DownloadErrorCode::OutputPermissionDenied
     } else if lower.contains("ffmpeg is not installed") || lower.contains("ffprobe not found") {
         DownloadErrorCode::FfmpegNotFound
-    } else if lower.contains("yt-dlp is outdated") || lower.contains("update yt-dlp") {
+    } else if is_outdated_engine_message(&combined_stderr) {
         DownloadErrorCode::YtdlpUpdateRequired
     } else if lower.contains("operation canceled") || lower.contains("interrupted by user") {
         DownloadErrorCode::DownloadCanceled
@@ -189,5 +219,64 @@ mod tests {
             details.message,
             DownloadErrorCode::DownloadProcessFailed.default_user_message()
         );
+    }
+
+    #[test]
+    fn test_classify_outdated_engine_patterns() {
+        let cases = [
+            "WARNING: Your yt-dlp version is older than 90 days. It is strongly recommended to always use the latest version.",
+            "ERROR: unable to extract yt initial data; please confirm you are on the latest version",
+            "ERROR: [youtube] abc: nsig extraction failed: Some formats may be missing",
+            "ERROR: Signature solving failed for player abc",
+            "ERROR: n challenge solving failed for player abc",
+            "ERROR: Failed to extract any player response",
+            "ERROR: yt-dlp is outdated, please update yt-dlp",
+        ];
+        for raw in cases {
+            let lines = vec![raw.to_string()];
+            let details = classify_ytdlp_error(Some(1), &lines, None);
+            assert_eq!(
+                details.code,
+                DownloadErrorCode::YtdlpUpdateRequired,
+                "expected outdated-engine classification for: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_outdated_detection_does_not_override_priority_codes() {
+        // Authentication, rate limiting and format issues must win even when the
+        // stderr also mentions an update recommendation.
+        let auth = vec![
+            "WARNING: Your yt-dlp version is older than 90 days".to_string(),
+            "ERROR: Sign in to confirm you're not a bot. Use --cookies".to_string(),
+        ];
+        assert_eq!(
+            classify_ytdlp_error(Some(1), &auth, None).code,
+            DownloadErrorCode::AuthenticationRequired
+        );
+
+        let rate = vec![
+            "WARNING: strongly recommended to always use the latest version".to_string(),
+            "ERROR: HTTP Error 429: Too Many Requests".to_string(),
+        ];
+        assert_eq!(
+            classify_ytdlp_error(Some(1), &rate, None).code,
+            DownloadErrorCode::RateLimited
+        );
+
+        let format = vec!["ERROR: Requested format is not available; update yt-dlp".to_string()];
+        assert_eq!(
+            classify_ytdlp_error(Some(1), &format, None).code,
+            DownloadErrorCode::FormatNotAvailable
+        );
+    }
+
+    #[test]
+    fn test_is_outdated_engine_message_matches_success_warning() {
+        // yt-dlp emits this on stderr with exit code 0 too.
+        let warning = "WARNING: Your yt-dlp version is older than 90 days, and it is strongly recommended to always use the latest version";
+        assert!(is_outdated_engine_message(warning));
+        assert!(!is_outdated_engine_message("[youtube] downloading video"));
     }
 }

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish, without the v prefix (for example 2.0.0)'
+        description: 'Version to publish, without the v prefix (for example 2.5.0)'
         required: true
         type: string
 
@@ -26,8 +26,22 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
+      # Policy guard: releases are published from the public `PolySaver` repository.
+      # This development repository holds no signing secret, so without this step a
+      # release attempt would fail later with a confusing "secret not configured"
+      # error instead of stating the actual policy.
+      - name: Verify this repository publishes releases
+        env:
+          RELEASE_REPOSITORY: AinsiParlaitZarathoustra/PolySaver
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REPOSITORY}" != "${RELEASE_REPOSITORY}" ]; then
+            echo "::error::Releases are published from ${RELEASE_REPOSITORY}; ${GITHUB_REPOSITORY} is development-only."
+            exit 1
+          fi
+
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve and validate version
         id: version
@@ -110,15 +124,15 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify native runner
         run: test "$(uname -m)" = "arm64"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: node-version.txt
           cache: npm
 
       - name: Setup Rust
@@ -133,7 +147,7 @@ jobs:
           key: release-aarch64-apple-darwin
 
       - name: Cache native sidecars
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             /tmp/polysaver_macos-aarch64_ffmpeg
@@ -185,7 +199,7 @@ jobs:
           cp "${signature_path}" "release-out/PolySaver_${RELEASE_VERSION}_macOS_arm64.app.tar.gz.sig"
 
       - name: Upload macOS ARM64 assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-macos-arm64
           path: release-out/*
@@ -209,12 +223,12 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: node-version.txt
           cache: npm
 
       - name: Setup Rust
@@ -265,7 +279,7 @@ jobs:
           cp "${msi_path}.sig" "release-out/PolySaver_${RELEASE_VERSION}_Windows_x64.msi.sig"
 
       - name: Upload Windows assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows-x64
           path: release-out/*
@@ -275,6 +289,13 @@ jobs:
   linux:
     name: Linux x64
     needs: validate
+    # ubuntu-22.04 is kept on purpose: it is the oldest runner still available and
+    # therefore the floor for the glibc version our AppImage/deb are built against
+    # (22.04 ships glibc 2.35, while 24.04 ships 2.39 and would break older distros).
+    # WARNING: GitHub announced its deprecation on 2026-09-17 and its removal on
+    # 2027-04-17, with job brownouts in the meantime. Before that date, move this
+    # job into a `debian:12` (or `ubuntu:22.04`) container running on ubuntu-24.04
+    # to keep producing the same compatible binaries.
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     permissions:
@@ -286,7 +307,7 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux system dependencies
         run: |
@@ -304,9 +325,9 @@ jobs:
             xdg-utils
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: node-version.txt
           cache: npm
 
       - name: Setup Rust
@@ -356,7 +377,7 @@ jobs:
           cp "${deb_path}" "release-out/PolySaver_${RELEASE_VERSION}_Linux_x64.deb"
 
       - name: Upload Linux assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux-x64
           path: release-out/*
@@ -379,22 +400,22 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download macOS ARM64 assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-macos-arm64
           path: release-input/macos-arm64
 
       - name: Download Windows assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-windows-x64
           path: release-input/windows
 
       - name: Download Linux assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-linux-x64
           path: release-input/linux

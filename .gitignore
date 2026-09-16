@@ -48,3 +48,6 @@ scratch/
 
 # Provisioned binary sidecars (downloaded via scripts/prepare-sidecars.sh)
 src-tauri/resources/bin/
+
+# Local tooling state (never committed)
+.mimosa/

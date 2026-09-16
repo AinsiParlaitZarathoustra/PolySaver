@@ -35,13 +35,11 @@ impl InMemorySettingsRepository {
                 AppSettings::new(
                     "/tmp/polysaver_tests".to_string(),
                     polysaver_core::domain::ThemeMode::System,
-                    false,
                     polysaver_core::domain::DownloadPreset::video(
                         polysaver_core::domain::OutputFormat::Mp4,
                         polysaver_core::domain::VideoQuality::Best,
                     )
                     .unwrap(),
-                    3,
                     polysaver_core::domain::Language::French,
                 )
                 .unwrap()
@@ -88,6 +86,18 @@ pub fn parse_untrusted_settings_json(raw_json: &str) -> Result<AppSettings, Core
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds an absolute path valid on every platform: a Unix-looking literal is
+    /// not absolute under Windows, and the domain validates destination paths.
+    fn abs_path(suffix: &str) -> String {
+        let base = if cfg!(windows) {
+            r"C:\polysaver_test"
+        } else {
+            "/polysaver_test"
+        };
+        format!("{base}/{suffix}")
+    }
+
     use polysaver_core::domain::download_job::DownloadId;
     use polysaver_core::domain::history::DownloadHistoryEntry;
     use polysaver_core::domain::media_url::MediaUrl;
@@ -114,11 +124,9 @@ mod tests {
         // 2. Save modified settings
         let custom_preset = DownloadPreset::video(OutputFormat::Mov, VideoQuality::P2160).unwrap();
         let custom = AppSettings::new(
-            "/custom/download/path".to_string(),
+            abs_path("custom/download/path"),
             ThemeMode::Light,
-            false,
             custom_preset,
-            6,
             Language::English,
         )
         .unwrap();
@@ -128,11 +136,12 @@ mod tests {
         // 3. Reload from fresh repository instance (cache-busted)
         let repo2 = JsonSettingsRepository::new(&test_dir, default_settings.clone());
         let loaded_custom = repo2.load().await.unwrap();
-        assert_eq!(loaded_custom.download_directory(), "/custom/download/path");
+        assert_eq!(
+            loaded_custom.download_directory(),
+            abs_path("custom/download/path")
+        );
         assert_eq!(loaded_custom.theme_mode(), ThemeMode::Light);
-        assert!(!loaded_custom.parallel_downloads());
         assert_eq!(loaded_custom.default_preset(), custom_preset);
-        assert_eq!(loaded_custom.max_concurrent(), 6);
         assert_eq!(loaded_custom.language(), Language::English);
 
         // 4. Test backward-compatibility migration of legacy ~/Downloads/PolySaver
@@ -189,7 +198,7 @@ mod tests {
             url1.clone(),
             "Rick Astley - Never Gonna Give You Up".to_string(),
             preset1,
-            "/downloads/video1.mp4".to_string(),
+            abs_path("downloads/video1.mp4"),
             Some(1000),
         )
         .unwrap();
@@ -205,7 +214,7 @@ mod tests {
             url2.clone(),
             "Me at the zoo".to_string(),
             preset2,
-            "/downloads/zoo.mp3".to_string(),
+            abs_path("downloads/zoo.mp3"),
             Some(2000),
         )
         .unwrap();
@@ -225,7 +234,7 @@ mod tests {
             url1.clone(),
             "Rick Astley - Updated Title".to_string(),
             preset1,
-            "/downloads/video1_updated.mp4".to_string(),
+            abs_path("downloads/video1_updated.mp4"),
             Some(3000),
         )
         .unwrap();

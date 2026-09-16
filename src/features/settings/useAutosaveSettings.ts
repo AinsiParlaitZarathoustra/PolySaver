@@ -22,13 +22,13 @@ export interface UseAutosaveSettingsResult {
 const DEFAULT_SETTINGS: AppSettingsDto = {
   downloadDirectory: '',
   themeMode: 'system',
-  parallelDownloads: true,
   defaultPreset: {
     format: 'mp4',
     videoQuality: 'p1080',
   },
-  maxConcurrent: 3,
   language: 'fr',
+  cookiesFromBrowser: undefined,
+  engineChannel: 'stable',
 };
 
 export function useAutosaveSettings(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 PolySaver contributors
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Card,
@@ -13,7 +13,11 @@ import {
   Alert,
   Tooltip,
   IconButton,
+  Button,
+  Collapse,
 } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
@@ -23,8 +27,10 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import CloseIcon from '@mui/icons-material/Close';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { useTranslation } from 'react-i18next';
 import type { DownloadErrorCode, DownloadJobDto, DownloadStatus, Language } from '../ipc/contracts';
+import { MAX_RETRY_ATTEMPTS } from '../ipc/contracts';
 import { defaultIpcClient } from '../ipc/client';
 import { EmptyQueue } from './EmptyQueue';
 import { formatTransferRate } from '../utils/formatTransferRate';
@@ -33,14 +39,23 @@ interface DownloadQueueProps {
   jobs: DownloadJobDto[];
   onDismissJob?: (id: string) => Promise<void>;
   onCancelJob?: (id: string) => Promise<void>;
+  onRetryJob?: (id: string) => void;
+  onUpdateEngine?: () => void;
+  isUpdatingEngine?: boolean;
   hideEmptyQueue?: boolean;
+  /** Surfaces action failures to the app-level toast instead of console-only. */
+  onError?: (message: string) => void;
 }
 
 export const DownloadQueue: React.FC<DownloadQueueProps> = ({
   jobs,
   onDismissJob,
   onCancelJob,
+  onRetryJob,
+  onUpdateEngine,
+  isUpdatingEngine = false,
   hideEmptyQueue = false,
+  onError,
 }) => {
   const { t } = useTranslation();
 
@@ -60,6 +75,10 @@ export const DownloadQueue: React.FC<DownloadQueueProps> = ({
           job={job}
           onDismiss={onDismissJob ? () => onDismissJob(job.id) : undefined}
           onCancel={onCancelJob ? () => onCancelJob(job.id) : undefined}
+          onRetry={onRetryJob ? () => onRetryJob(job.id) : undefined}
+          onUpdateEngine={onUpdateEngine}
+          isUpdatingEngine={isUpdatingEngine}
+          onError={onError}
         />
       ))}
     </Stack>
@@ -70,9 +89,22 @@ const DownloadJobCard: React.FC<{
   job: DownloadJobDto;
   onDismiss?: () => void;
   onCancel?: () => void;
-}> = ({ job, onDismiss, onCancel }) => {
+  onRetry?: () => void;
+  onUpdateEngine?: () => void;
+  isUpdatingEngine?: boolean;
+  onError?: (message: string) => void;
+}> = ({
+  job,
+  onDismiss,
+  onCancel,
+  onRetry,
+  onUpdateEngine,
+  isUpdatingEngine = false,
+  onError,
+}) => {
   const { t, i18n } = useTranslation();
   const currentLang = (i18n.language === 'en' ? 'en' : 'fr') as Language;
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const isVideo =
     job.preset.format === 'mp4' || job.preset.format === 'mov';
@@ -122,6 +154,7 @@ const DownloadJobCard: React.FC<{
       await defaultIpcClient.revealDownloadedFile(job.id);
     } catch (err) {
       console.error('Failed to reveal file:', err);
+      onError?.(t('errors.OUTPUT_FILE_NOT_FOUND'));
     }
   };
 
@@ -130,6 +163,7 @@ const DownloadJobCard: React.FC<{
       await defaultIpcClient.openDownloadedFile(job.id);
     } catch (err) {
       console.error('Failed to open file:', err);
+      onError?.(t('errors.OUTPUT_FILE_NOT_FOUND'));
     }
   };
 
@@ -139,6 +173,7 @@ const DownloadJobCard: React.FC<{
       await defaultIpcClient.openDownloadSourceUrl(job.id);
     } catch (err) {
       console.error('Failed to open download source URL:', err);
+      onError?.(t('errors.SOURCE_URL_INVALID'));
     }
   };
 
@@ -229,6 +264,20 @@ const DownloadJobCard: React.FC<{
                 sx={{ fontWeight: 600 }}
               />
 
+              {/* Automatic retry counter (transient failures) */}
+              {!isTerminal && (job.retryCount ?? 0) > 0 && (
+                <Chip
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                  label={t('queue.retryAttempt', {
+                    current: job.retryCount,
+                    max: MAX_RETRY_ATTEMPTS,
+                  })}
+                  sx={{ height: 22, fontSize: '0.72rem' }}
+                />
+              )}
+
               <StatusChip status={job.status} />
 
               {/* Completed Action Buttons */}
@@ -281,6 +330,27 @@ const DownloadJobCard: React.FC<{
                     </IconButton>
                   </Tooltip>
                 </Stack>
+              )}
+
+              {/* Retry Action Button (failed jobs only) */}
+              {isFailed && onRetry && (
+                <Tooltip title={t('queue.actions.retryAria')} arrow>
+                  <IconButton
+                    size="small"
+                    onClick={onRetry}
+                    aria-label={t('queue.actions.retryAria')}
+                    color="primary"
+                    sx={{
+                      border: '1px solid',
+                      borderColor: 'primary.main',
+                      '&:hover': {
+                        bgcolor: 'action.hover',
+                      },
+                    }}
+                  >
+                    <RefreshIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
               )}
 
               {/* Cancel Action Button (for active / queued jobs) */}
@@ -340,6 +410,10 @@ const DownloadJobCard: React.FC<{
                       : 'rgba(0, 0, 0, 0.06)',
                   '& .MuiLinearProgress-bar': {
                     borderRadius: 3,
+                    // Theme tokens keep the gradient consistent in light and dark modes
+                    // and cover both indeterminate bars (bar1/bar2 share this class).
+                    background: (theme) =>
+                      `linear-gradient(90deg, ${theme.palette.primary.light} 0%, ${theme.palette.primary.dark} 100%)`,
                   },
                 }}
               />
@@ -394,6 +468,79 @@ const DownloadJobCard: React.FC<{
               <Typography variant="body2" sx={{ fontWeight: 500 }}>
                 {errorMessage}
               </Typography>
+
+              {/* Consultable technical details: component, exit code, stderr tail */}
+              {job.errorDetails &&
+                (job.errorDetails.component ||
+                  job.errorDetails.exitCode !== undefined ||
+                  job.errorDetails.stderrTail) && (
+                  <Box sx={{ mt: 0.5 }}>
+                    <Button
+                      size="small"
+                      color="inherit"
+                      onClick={() => setDetailsOpen((v) => !v)}
+                      startIcon={
+                        detailsOpen ? (
+                          <ExpandLessIcon fontSize="small" />
+                        ) : (
+                          <ExpandMoreIcon fontSize="small" />
+                        )
+                      }
+                      sx={{ textTransform: 'none', fontSize: '0.78rem', p: 0, minWidth: 0 }}
+                    >
+                      {t('queue.errorDetails')}
+                    </Button>
+                    <Collapse in={detailsOpen} timeout="auto" unmountOnExit>
+                      <Box sx={{ mt: 0.75, pl: 0.5 }}>
+                        {job.errorDetails.component && (
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            {t('queue.errorDetailsComponent')}: {job.errorDetails.component}
+                          </Typography>
+                        )}
+                        {job.errorDetails.exitCode !== undefined && (
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            {t('queue.errorDetailsExitCode')}: {job.errorDetails.exitCode}
+                          </Typography>
+                        )}
+                        {job.errorDetails.stderrTail && (
+                          <Typography
+                            variant="caption"
+                            component="pre"
+                            sx={{
+                              display: 'block',
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-word',
+                              fontFamily: 'monospace',
+                              fontSize: '0.72rem',
+                              mt: 0.5,
+                              maxHeight: 160,
+                              overflowY: 'auto',
+                              bgcolor: 'action.hover',
+                              borderRadius: 1,
+                              p: 1,
+                            }}
+                          >
+                            {job.errorDetails.stderrTail}
+                          </Typography>
+                        )}
+                      </Box>
+                    </Collapse>
+                  </Box>
+                )}
+
+              {errorCode === 'YTDLP_UPDATE_REQUIRED' && onUpdateEngine && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="error"
+                  startIcon={<RefreshIcon fontSize="small" />}
+                  onClick={onUpdateEngine}
+                  disabled={isUpdatingEngine}
+                  sx={{ mt: 1, textTransform: 'none', fontWeight: 600 }}
+                >
+                  {isUpdatingEngine ? t('engine.updating') : t('engine.updateButton')}
+                </Button>
+              )}
             </Alert>
           )}
         </Stack>

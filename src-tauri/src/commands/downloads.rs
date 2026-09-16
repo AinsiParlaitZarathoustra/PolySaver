@@ -3,11 +3,11 @@
 
 use crate::app_state::AppState;
 use crate::dto::history::DownloadHistoryEntryDto;
-use crate::dto::media::{DownloadJobDto, StartDownloadRequestDto};
+use crate::dto::media::{DownloadJobDto, StartDownloadRequestDto, StartPlaylistDownloadRequestDto};
 use crate::dto::IpcError;
 use crate::path_resolver::resolve_user_directory;
 use polysaver_core::domain::history::HistoryEntryId;
-use polysaver_core::domain::{DownloadId, DownloadPreset};
+use polysaver_core::domain::{DownloadId, DownloadPreset, MediaUrl};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -44,6 +44,42 @@ pub async fn start_download(
         .map_err(IpcError::from)?;
 
     Ok(DownloadJobDto::from(&job))
+}
+
+/// IPC command starting one download job per selected playlist entry.
+///
+/// Every selected URL is re-parsed through `MediaUrl` (scheme, host and reserved-IP
+/// checks included) before any job is created, so the frontend cannot bypass validation.
+#[tauri::command]
+pub async fn start_playlist_download(
+    state: State<'_, AppState>,
+    request: StartPlaylistDownloadRequestDto,
+) -> Result<Vec<DownloadJobDto>, IpcError> {
+    let preset = match request.preset {
+        Some(dto) => Some(DownloadPreset::try_from(dto).map_err(IpcError::from)?),
+        None => None,
+    };
+
+    let custom_output_dir = match request.output_directory {
+        Some(ref dir_str) => {
+            let resolved = resolve_user_directory(dir_str, &state.home_dir)?;
+            Some(resolved)
+        }
+        None => None,
+    };
+
+    let mut urls = Vec::with_capacity(request.selected_urls.len());
+    for raw in &request.selected_urls {
+        urls.push(MediaUrl::parse(raw).map_err(IpcError::from)?);
+    }
+
+    let jobs = state
+        .start_download_service
+        .start_download_batch(urls, preset, custom_output_dir)
+        .await
+        .map_err(IpcError::from)?;
+
+    Ok(jobs.iter().map(DownloadJobDto::from).collect())
 }
 
 /// IPC command dismissing a job from active queue in memory.
@@ -229,6 +265,21 @@ pub async fn cancel_download(
     let job = state
         .start_download_service
         .cancel_download(job_id)
+        .await
+        .map_err(IpcError::from)?;
+    Ok(DownloadJobDto::from(&job))
+}
+
+/// IPC command re-queueing a failed job as a new queued entry preserving URL, preset and directory.
+#[tauri::command]
+pub async fn retry_download(
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<DownloadJobDto, IpcError> {
+    let job_id = DownloadId::try_from(download_id.as_str()).map_err(IpcError::from)?;
+    let job = state
+        .start_download_service
+        .retry_download(job_id)
         .await
         .map_err(IpcError::from)?;
     Ok(DownloadJobDto::from(&job))

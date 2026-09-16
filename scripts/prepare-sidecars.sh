@@ -8,8 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TARGET_BIN_DIR="${ROOT_DIR}/src-tauri/resources/bin"
 
-# Pinned exact versions
-YTDLP_VERSION="2026.08.19"
+# Pinned exact versions (yt-dlp version is centralized in ytdlp-version.txt)
+YTDLP_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/ytdlp-version.txt")"
 FFMPEG_VERSION="9.0.1"
 
 # Target platform selection (default: auto-detect)
@@ -47,6 +47,25 @@ echo "========================================="
 # Clean staging directory
 rm -rf "${TARGET_BIN_DIR}"
 mkdir -p "${TARGET_BIN_DIR}"
+
+# Download a pinned artifact, failing with an actionable message.
+#
+# A 404 here almost always means an upstream build was pruned (this is how the
+# Windows and Linux CI jobs broke: BtbN deletes old autobuild tags). The plain
+# curl error is unhelpful, so it is replaced with the exact remedy.
+download() {
+    local url="$1"
+    local destination="$2"
+
+    if ! curl -fsSL --retry 3 --retry-all-errors -o "${destination}" "${url}"; then
+        echo "[ERROR] Failed to download: ${url}" >&2
+        echo "[ERROR] If this is a 404, the pinned upstream build was likely pruned." >&2
+        echo "[ERROR] Pick the newest autobuild-* tag from" >&2
+        echo "[ERROR]   https://github.com/BtbN/FFmpeg-Builds/releases" >&2
+        echo "[ERROR] then update the URL and its hash from that release's checksums.sha256." >&2
+        return 1
+    fi
+}
 
 verify_hash() {
     local file="$1"
@@ -228,8 +247,11 @@ EOF
     windows-x64)
         YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp.exe"
         YTDLP_SHA256="66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
-        FFMPEG_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-22-12-58/ffmpeg-n9.0.1-6-g9d4ca21220-win64-gpl-9.0.zip"
-        FFMPEG_ZIP_SHA256="7b777da65c0f93a3f9f524997b2852612d984e39249ca241b63da193ce7e4435"
+        # Pinned upstream autobuild. BtbN prunes old tags, so a pinned tag can
+        # disappear: when this URL 404s, pick the newest autobuild-* tag and refresh
+        # both the filename and the hash from that release's checksums.sha256.
+        FFMPEG_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-12-13-12/ffmpeg-n9.0.1-29-gad500d59cb-win64-gpl-9.0.zip"
+        FFMPEG_ZIP_SHA256="e536631f802a668172209a7f3f12bd7b87cd05dccebb498da7a518a3d6d3d037"
 
         # 1. yt-dlp.exe
         echo "[DOWNLOADING] yt-dlp.exe ${YTDLP_VERSION} for Windows x64..."
@@ -241,7 +263,7 @@ EOF
         echo "[DOWNLOADING] FFmpeg ${FFMPEG_VERSION} package for Windows x64..."
         TEMP_DIR="$(mktemp -d)"
         FFMPEG_ZIP="${TEMP_DIR}/ffmpeg_win64.zip"
-        curl -fsSL -o "${FFMPEG_ZIP}" "${FFMPEG_ZIP_URL}"
+        download "${FFMPEG_ZIP_URL}" "${FFMPEG_ZIP}"
         verify_hash "${FFMPEG_ZIP}" "${FFMPEG_ZIP_SHA256}"
 
         unzip -q "${FFMPEG_ZIP}" -d "${TEMP_DIR}"
@@ -257,8 +279,11 @@ EOF
     linux-x64)
         YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux"
         YTDLP_SHA256="58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"
-        FFMPEG_TAR_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-22-12-58/ffmpeg-n9.0.1-6-g9d4ca21220-linux64-gpl-9.0.tar.xz"
-        FFMPEG_TAR_SHA256="b32f5844b258b4367896b1aa6839ee72ee96d5c7c9136873f66b3c4a1fc2c1df"
+        # Pinned upstream autobuild. BtbN prunes old tags, so a pinned tag can
+        # disappear: when this URL 404s, pick the newest autobuild-* tag and refresh
+        # both the filename and the hash from that release's checksums.sha256.
+        FFMPEG_TAR_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-12-13-12/ffmpeg-n9.0.1-29-gad500d59cb-linux64-gpl-9.0.tar.xz"
+        FFMPEG_TAR_SHA256="223d14701f64c3d3df08f8e4fc712e6d4b36d75d5ec5bd1c4ce190a33778cee8"
 
         # 1. yt-dlp
         echo "[DOWNLOADING] yt-dlp ${YTDLP_VERSION} for Linux x64..."
@@ -271,7 +296,7 @@ EOF
         echo "[DOWNLOADING] FFmpeg ${FFMPEG_VERSION} package for Linux x64..."
         TEMP_DIR="$(mktemp -d)"
         FFMPEG_TAR="${TEMP_DIR}/ffmpeg_linux64.tar.xz"
-        curl -fsSL -o "${FFMPEG_TAR}" "${FFMPEG_TAR_URL}"
+        download "${FFMPEG_TAR_URL}" "${FFMPEG_TAR}"
         verify_hash "${FFMPEG_TAR}" "${FFMPEG_TAR_SHA256}"
 
         tar -xf "${FFMPEG_TAR}" -C "${TEMP_DIR}"

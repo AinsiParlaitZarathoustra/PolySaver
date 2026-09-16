@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.0.0"
+version = "2.5.0"
 edition = "2021"
 license = "GPL-3.0-only"
 authors = ["PolySaver contributors"]
@@ -28,12 +28,22 @@ polysaver-storage = { path = "crates/polysaver-storage" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.43", features = ["sync", "macros", "rt", "rt-multi-thread", "fs", "time", "process", "io-util"] }
+tokio = { version = "1.43", features = ["sync", "macros", "rt", "rt-multi-thread", "fs", "time", "process", "io-util", "net"] }
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 async-trait = "0.1"
 regex = "1.10"
 tokio-util = "0.7"
+# reqwest 0.13 is already pulled in by tauri-plugin-updater; keep the same major
+# to avoid stacking two TLS stacks. In 0.13 the TLS feature is `rustls`.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+sha2 = "0.11"
+# Archive extraction for the Node.js runtime install (yt-dlp adapter only).
+# `zip` is pinned to the version already present in Cargo.lock (pulled by
+# tauri-plugin-updater) to avoid two concurrent major versions.
+flate2 = "1.1"
+tar = "0.4"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 # Tauri v2 dependencies (strictly isolated in src-tauri)
 tauri = { version = "2", features = [] }

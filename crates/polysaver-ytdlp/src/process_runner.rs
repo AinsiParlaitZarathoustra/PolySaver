@@ -7,7 +7,8 @@
 //! multi-stream progress aggregation, and cancellation support.
 
 use crate::aggregator::MultiStreamProgressAggregator;
-use crate::error_classifier::classify_ytdlp_error;
+use crate::detect_cookies_diagnostic;
+use crate::error_classifier::{classify_ytdlp_error, is_outdated_engine_message};
 use polysaver_core::error::{CoreError, DownloadErrorCode, DownloadErrorDetails};
 use polysaver_core::ports::media_downloader::StreamProgress;
 use regex::Regex;
@@ -42,6 +43,11 @@ pub struct ProcessRunResult {
     pub output_files: Vec<PathBuf>,
     pub stdout_lines: Vec<String>,
     pub early_meta: Option<EarlyMediaMetadata>,
+    /// yt-dlp emits an "older than 90 days" WARNING on stderr even when the
+    /// download succeeds (exit 0); surfaced here so callers can advise an update.
+    pub engine_outdated: bool,
+    /// Cookie-import outcome read from stderr (only when cookies were requested).
+    pub cookies_diagnostic: Option<polysaver_core::ports::media_downloader::CookiesDiagnostic>,
 }
 
 /// Hardened executor for yt-dlp.
@@ -83,6 +89,12 @@ impl YtDlpProcessRunner {
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true);
 
+        // Own process group on Unix: yt-dlp spawns ffmpeg for muxing, and killing
+        // only the direct child would leave ffmpeg running after a cancellation.
+        // The whole group is signalled on cancel (see below).
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         let mut child = cmd.spawn().map_err(|err| {
             let mut details = DownloadErrorDetails::from_code(DownloadErrorCode::YtdlpStartFailed);
             details.message = format!("Impossible de lancer le moteur de téléchargement: {err}");
@@ -101,7 +113,7 @@ impl YtDlpProcessRunner {
         let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_outputs = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
         let captured_early_meta = Arc::new(Mutex::new(None::<EarlyMediaMetadata>));
-        let progress_aggregator = Arc::new(Mutex::new(MultiStreamProgressAggregator::new(2)));
+        let progress_aggregator = Arc::new(Mutex::new(MultiStreamProgressAggregator::new()));
 
         let stderr_collector = Arc::clone(&stderr_lines);
         let stderr_task = tokio::spawn(async move {
@@ -157,11 +169,15 @@ impl YtDlpProcessRunner {
 
                 // Check for [POLYSAVER_PROGRESS] line
                 if trimmed.contains("[POLYSAVER_PROGRESS]") {
-                    if let Some((stream_id, parsed)) =
+                    if let Some((stream_id, parsed, status_finished)) =
                         parse_polysaver_progress_line_with_stream(&trimmed)
                     {
                         let mut agg_lock = aggregator_ref.lock().await;
-                        let agg_progress = agg_lock.feed(stream_id.as_deref(), &parsed);
+                        let agg_progress = agg_lock.feed_with_status(
+                            stream_id.as_deref(),
+                            &parsed,
+                            status_finished,
+                        );
                         if let Some(ref callback) = cb {
                             callback(agg_progress);
                         }
@@ -193,8 +209,7 @@ impl YtDlpProcessRunner {
                     })?
                 }
                 _ = token.cancelled() => {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
+                    terminate_process_group(&mut child).await;
                     let _ = tokio::join!(stdout_task, stderr_task);
                     return Err(CoreError::OperationCancelled);
                 }
@@ -216,6 +231,17 @@ impl YtDlpProcessRunner {
             let details = classify_ytdlp_error(status.code(), &collected_stderr, version);
             return Err(CoreError::DownloadFailed(details));
         }
+
+        // Flush a final 100% now that the process exited successfully. Without
+        // this the UI could sit at 99% until the muxing phase reports progress.
+        if let Some(ref callback) = progress_callback {
+            let aggregator = progress_aggregator.lock().await;
+            callback(aggregator.finish());
+        }
+
+        // Even on success, yt-dlp warns on stderr when its build is stale.
+        let engine_outdated = is_outdated_engine_message(&collected_stderr.join("\n"));
+        let cookies_diagnostic = detect_cookies_diagnostic(&collected_stderr);
 
         let mut output_files = {
             let lock = captured_outputs.lock().await;
@@ -255,15 +281,62 @@ impl YtDlpProcessRunner {
             output_files,
             stdout_lines,
             early_meta,
+            engine_outdated,
+            cookies_diagnostic,
         })
     }
 }
 
+/// Terminates the child process and every process it spawned.
+///
+/// yt-dlp runs ffmpeg as a subprocess during muxing. Since the child is started
+/// in its own process group (Unix), signalling the group kills both; on Windows
+/// only the direct child is terminated, which is documented behaviour there.
+async fn terminate_process_group(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // Negative pid targets the whole process group.
+            let pgid = -(pid as i32);
+            if libc_kill(pgid) == 0 {
+                let _ = child.wait().await;
+                return;
+            }
+        }
+    }
+
+    // Fallback (and Windows path): kill the direct child only.
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+/// Sends SIGKILL to a process group. Isolated so the FFI call stays tiny.
+#[cfg(unix)]
+fn libc_kill(pid: i32) -> i32 {
+    // SIGKILL = 9 on every Unix we support. `kill` is async-signal-safe and we
+    // only ever pass a pid of a child we spawned in its own process group.
+    unsafe { kill(pid, 9) }
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
 /// Parses early media metadata printed before download.
-/// Format: `[POLYSAVER_META] title:My Video duration:120 formats:137+140 filesize:10000000,2000000`
+///
+/// Format (tab-separated):
+/// `[POLYSAVER_META] title:My Video<TAB>duration:120<TAB>f0:137|50000000<TAB>f1:140|5000000<TAB>fallback_id:137+140<TAB>fallback_size:55000000`
+///
+/// `requested_formats.N` only exists when the selector merged ≥ 2 formats, so
+/// the `fallback_*` tokens are used for single-file selections (audio presets).
 pub fn parse_polysaver_meta_line(line: &str) -> Option<EarlyMediaMetadata> {
     let mut meta = EarlyMediaMetadata::default();
     let payload = line.split("[POLYSAVER_META]").nth(1)?.trim();
+
+    let mut stream_entries: Vec<(u8, String, Option<u64>)> = Vec::new();
+    let mut fallback_id: Option<String> = None;
+    let mut fallback_size: Option<u64> = None;
 
     for token in payload.split('\t') {
         let trimmed = token.trim();
@@ -279,66 +352,83 @@ pub fn parse_polysaver_meta_line(line: &str) -> Option<EarlyMediaMetadata> {
                     meta.duration_seconds = Some(d.round() as u64);
                 }
             }
-        } else if let Some(val) = trimmed.strip_prefix("formats:") {
+        } else if let Some(val) = trimmed.strip_prefix("fallback_id:") {
             let clean = val.trim();
-            for f in clean.split('+') {
-                let f_clean = f.trim();
-                if !f_clean.is_empty() && f_clean != "NA" && f_clean != "None" {
-                    meta.format_ids.push(f_clean.to_string());
+            if !clean.is_empty() && clean != "NA" && clean != "None" {
+                fallback_id = Some(clean.to_string());
+            }
+        } else if let Some(val) = trimmed.strip_prefix("fallback_size:") {
+            fallback_size = parse_optional_size(val);
+        } else if let Some(rest) = trimmed.strip_prefix('f') {
+            // Indexed entries: `0:137|50000000`
+            if let Some((idx_str, payload)) = rest.split_once(':') {
+                if let Ok(idx) = idx_str.parse::<u8>() {
+                    let mut parts = payload.split('|');
+                    let id = parts.next().unwrap_or("").trim();
+                    let size = parts.next().and_then(parse_optional_size);
+                    if !id.is_empty() && id != "NA" && id != "None" {
+                        stream_entries.push((idx, id.to_string(), size));
+                    }
                 }
             }
-        } else if let Some(val) = trimmed.strip_prefix("filesize:") {
-            let clean = val.trim();
-            for s in clean.split(',') {
-                let s_clean = s.trim();
-                let parsed_size = if s_clean != "NA" && s_clean != "None" {
-                    s_clean.parse::<f64>().ok().map(|bytes| bytes as u64)
-                } else {
-                    None
-                };
-                meta.stream_sizes.push(parsed_size);
-            }
+        }
+    }
+
+    stream_entries.sort_by_key(|(idx, _, _)| *idx);
+    for (_, id, size) in stream_entries {
+        meta.format_ids.push(id);
+        meta.stream_sizes.push(size);
+    }
+
+    // Single-file selection: `requested_formats` was unavailable, use the fallback.
+    if meta.format_ids.is_empty() {
+        if let Some(id) = fallback_id {
+            meta.format_ids.push(id);
+            meta.stream_sizes.push(fallback_size);
         }
     }
 
     Some(meta)
 }
 
+/// Parses a numeric byte size token, treating `NA`/`None`/empty as absent.
+fn parse_optional_size(raw: &str) -> Option<u64> {
+    let clean = raw.trim();
+    if clean.is_empty() || clean == "NA" || clean == "None" {
+        return None;
+    }
+    clean
+        .parse::<f64>()
+        .ok()
+        .filter(|v| *v > 0.0)
+        .map(|v| v as u64)
+}
+
 /// Parses a structured PolySaver progress line with stream identifier.
-/// Format: `[POLYSAVER_PROGRESS] percent:XX.X% downloaded:12345 total:12345 speed:1234567.8 stream:137`
+///
+/// Format: `[POLYSAVER_PROGRESS] status:downloading downloaded:12345 total:12345 est:23456 speed:1234567.8 stream:137`
+/// Only numeric fields are parsed; the percentage is computed by the aggregator.
 pub fn parse_polysaver_progress_line_with_stream(
     line: &str,
-) -> Option<(Option<String>, StreamProgress)> {
-    let mut percent = None;
+) -> Option<(Option<String>, StreamProgress, bool)> {
     let mut downloaded_bytes = None;
     let mut total_bytes = None;
+    let mut total_bytes_estimate = None;
     let mut speed_bytes = None;
     let mut stream_id = None;
+    let mut status_finished = false;
 
     for token in line.split_whitespace() {
-        if let Some(val) = token.strip_prefix("percent:") {
-            let clean = val.trim_matches('%').trim();
-            if let Ok(p) = clean.parse::<f32>() {
-                percent = Some(p.round().clamp(0.0, 100.0) as u8);
-            }
-        } else if let Some(val) = token.strip_prefix("downloaded:") {
-            let clean = val.trim();
-            if clean != "NA" && clean != "None" {
-                if let Ok(d) = clean.parse::<f64>() {
-                    if d > 0.0 {
-                        downloaded_bytes = Some(d as u64);
-                    }
-                }
+        if let Some(val) = token.strip_prefix("downloaded:") {
+            if let Some(v) = parse_optional_size(val) {
+                downloaded_bytes = Some(v);
+            } else if val.trim() == "0" {
+                downloaded_bytes = Some(0);
             }
         } else if let Some(val) = token.strip_prefix("total:") {
-            let clean = val.trim();
-            if clean != "NA" && clean != "None" {
-                if let Ok(t) = clean.parse::<f64>() {
-                    if t > 0.0 {
-                        total_bytes = Some(t as u64);
-                    }
-                }
-            }
+            total_bytes = parse_optional_size(val);
+        } else if let Some(val) = token.strip_prefix("est:") {
+            total_bytes_estimate = parse_optional_size(val);
         } else if let Some(val) = token.strip_prefix("speed:") {
             let clean = val.trim().trim_end_matches("B/s").trim();
             if clean != "NA" && clean != "None" {
@@ -353,22 +443,29 @@ pub fn parse_polysaver_progress_line_with_stream(
             if !clean.is_empty() && clean != "NA" && clean != "None" {
                 stream_id = Some(clean.to_string());
             }
+        } else if let Some(val) = token.strip_prefix("status:") {
+            if val.trim().eq_ignore_ascii_case("finished") {
+                status_finished = true;
+            }
         }
     }
 
-    if percent.is_some()
-        || downloaded_bytes.is_some()
+    if downloaded_bytes.is_some()
         || total_bytes.is_some()
+        || total_bytes_estimate.is_some()
         || speed_bytes.is_some()
+        || status_finished
     {
         Some((
             stream_id,
             StreamProgress {
-                percent,
+                percent: None,
                 downloaded_bytes,
                 total_bytes,
+                total_bytes_estimate,
                 speed_bytes_per_second: speed_bytes,
             },
+            status_finished,
         ))
     } else {
         None
@@ -377,7 +474,7 @@ pub fn parse_polysaver_progress_line_with_stream(
 
 /// Backwards-compatible parser wrapper for single progress line.
 pub fn parse_polysaver_progress_line(line: &str) -> Option<StreamProgress> {
-    parse_polysaver_progress_line_with_stream(line).map(|(_, p)| p)
+    parse_polysaver_progress_line_with_stream(line).map(|(_, p, _)| p)
 }
 
 /// Fallback parser for standard human-readable yt-dlp progress line.
@@ -420,6 +517,7 @@ pub fn parse_fallback_progress_line(line: &str) -> Option<StreamProgress> {
         percent,
         downloaded_bytes: None,
         total_bytes,
+        total_bytes_estimate: None,
         speed_bytes_per_second,
     })
 }
@@ -430,24 +528,69 @@ mod tests {
 
     #[test]
     fn test_parse_polysaver_progress_template_full() {
-        let line =
-            "[POLYSAVER_PROGRESS] percent:45.6% downloaded:23897120 total:52428800 speed:2500000.0 stream:137";
-        let (stream, parsed) = parse_polysaver_progress_line_with_stream(line).unwrap();
+        let line = "[POLYSAVER_PROGRESS] status:downloading downloaded:23897120 total:52428800 est:NA speed:2500000.0 stream:137";
+        let (stream, parsed, finished) = parse_polysaver_progress_line_with_stream(line).unwrap();
         assert_eq!(stream, Some("137".to_string()));
-        assert_eq!(parsed.percent, Some(46));
+        assert_eq!(parsed.percent, None, "percentage is computed downstream");
         assert_eq!(parsed.downloaded_bytes, Some(23897120));
         assert_eq!(parsed.total_bytes, Some(52428800));
+        assert_eq!(parsed.total_bytes_estimate, None);
         assert_eq!(parsed.speed_bytes_per_second, Some(2500000));
+        assert!(!finished);
     }
 
     #[test]
-    fn test_parse_polysaver_meta_line() {
-        let line = "[POLYSAVER_META] title:Big Buck Bunny\tduration:596\tformats:137+140\tfilesize:50000000,5000000";
+    fn test_parse_progress_line_hls_estimate_and_finished_status() {
+        let line = "[POLYSAVER_PROGRESS] status:finished downloaded:999 total:NA est:123456 speed:NA stream:602";
+        let (stream, parsed, finished) = parse_polysaver_progress_line_with_stream(line).unwrap();
+        assert_eq!(stream, Some("602".to_string()));
+        assert_eq!(parsed.downloaded_bytes, Some(999));
+        assert_eq!(parsed.total_bytes, None);
+        assert_eq!(parsed.total_bytes_estimate, Some(123456));
+        assert_eq!(parsed.speed_bytes_per_second, None);
+        assert!(finished);
+    }
+
+    #[test]
+    fn test_parse_progress_line_without_stream_id() {
+        // A line followed by a NA stream id must still be usable.
+        let line =
+            "[POLYSAVER_PROGRESS] status:downloading downloaded:0 total:1000 est:NA speed:NA stream:NA";
+        let (stream, parsed, finished) = parse_polysaver_progress_line_with_stream(line).unwrap();
+        assert_eq!(stream, None);
+        assert_eq!(parsed.downloaded_bytes, Some(0));
+        assert_eq!(parsed.total_bytes, Some(1000));
+        assert!(!finished);
+    }
+
+    #[test]
+    fn test_parse_polysaver_meta_line_two_streams() {
+        let line = "[POLYSAVER_META] title:Big Buck Bunny\tduration:596\tf0:137|50000000\tf1:140|5000000\tfallback_id:137+140\tfallback_size:55000000";
         let meta = parse_polysaver_meta_line(line).unwrap();
         assert_eq!(meta.title, Some("Big Buck Bunny".to_string()));
         assert_eq!(meta.duration_seconds, Some(596));
         assert_eq!(meta.format_ids, vec!["137".to_string(), "140".to_string()]);
         assert_eq!(meta.stream_sizes, vec![Some(50000000), Some(5000000)]);
+    }
+
+    #[test]
+    fn test_parse_polysaver_meta_line_single_file_fallback() {
+        // Audio preset: requested_formats is absent, so f0/f1 are NA.
+        let line = "[POLYSAVER_META] title:Audio\tduration:200\tf0:NA|NA\tf1:NA|NA\tfallback_id:140\tfallback_size:5000000";
+        let meta = parse_polysaver_meta_line(line).unwrap();
+        assert_eq!(meta.format_ids, vec!["140".to_string()]);
+        assert_eq!(meta.stream_sizes, vec![Some(5000000)]);
+    }
+
+    #[test]
+    fn test_parse_polysaver_meta_line_missing_sizes() {
+        let line =
+            "[POLYSAVER_META] title:Odd\tduration:NA\tf0:602|NA\tfallback_id:NA\tfallback_size:NA";
+        let meta = parse_polysaver_meta_line(line).unwrap();
+        assert_eq!(meta.title, Some("Odd".to_string()));
+        assert_eq!(meta.duration_seconds, None);
+        assert_eq!(meta.format_ids, vec!["602".to_string()]);
+        assert_eq!(meta.stream_sizes, vec![None]);
     }
 
     #[test]
@@ -460,5 +603,97 @@ mod tests {
             parsed.speed_bytes_per_second,
             Some((2.5 * 1024.0 * 1024.0) as u64)
         );
+    }
+
+    /// Cancelling must kill the whole process group, so a grandchild process
+    /// (as ffmpeg is for yt-dlp) cannot survive the cancellation.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cancellation_kills_process_group_including_grandchildren() {
+        let dir = std::env::temp_dir().join(format!("polysaver_pg_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // Script that spawns a long-lived grandchild and reports its pid, then
+        // waits forever itself. Mirrors yt-dlp -> ffmpeg.
+        let script = dir.join("parent.sh");
+        let pid_file = dir.join("grandchild.pid");
+        tokio::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n/bin/sleep 300 &\necho $! > '{pid}'\nwhile true; do /bin/sleep 1; done\n",
+                pid = pid_file.display()
+            ),
+        )
+        .await
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let token = CancellationToken::new();
+        let token_for_cancel = token.clone();
+
+        let runner = tokio::spawn({
+            let script = script.clone();
+            let dir = dir.clone();
+            async move {
+                YtDlpProcessRunner::run(
+                    &script,
+                    None,
+                    &[],
+                    &dir,
+                    Some(&token_for_cancel),
+                    None,
+                    None,
+                )
+                .await
+            }
+        });
+
+        // Wait until the grandchild pid has been recorded.
+        let mut grandchild_pid = 0i32;
+        for _ in 0..100 {
+            if let Ok(content) = tokio::fs::read_to_string(&pid_file).await {
+                if let Ok(pid) = content.trim().parse::<i32>() {
+                    grandchild_pid = pid;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(grandchild_pid > 0, "grandchild process never started");
+
+        // The grandchild is alive before cancellation.
+        assert!(
+            libc_kill_check(grandchild_pid),
+            "grandchild should be running before cancellation"
+        );
+
+        token.cancel();
+        let result = runner.await.unwrap();
+        assert!(matches!(result, Err(CoreError::OperationCancelled)));
+
+        // Give the OS a moment to reap, then assert the grandchild is gone.
+        let mut gone = false;
+        for _ in 0..40 {
+            if !libc_kill_check(grandchild_pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            gone,
+            "grandchild process {grandchild_pid} survived the cancellation"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Returns true when `pid` still exists (signal 0 performs error checking only).
+    #[cfg(unix)]
+    fn libc_kill_check(pid: i32) -> bool {
+        unsafe { kill(pid, 0) == 0 }
     }
 }

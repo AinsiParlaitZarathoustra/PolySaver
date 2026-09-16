@@ -17,10 +17,22 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+/// Millisecond timestamp plus a short random suffix, so two backups in the same
+/// second cannot overwrite each other.
+fn unique_suffix() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{millis}_{}", Uuid::new_v4().simple())
+}
+
 const HISTORY_SCHEMA_VERSION: u32 = 1;
 const NDJSON_HISTORY_FILE_NAME: &str = "download_history.ndjson";
 const LEGACY_JSON_HISTORY_FILE_NAME: &str = "download_history.json";
 const MAX_JOURNAL_SIZE_BYTES: u64 = 4 * 1024 * 1024; // 4 MB
+/// Maximum number of `.rejected_*` backup files kept next to the journal.
+const MAX_REJECTED_BACKUPS: usize = 5;
 
 /// DTO for individual history entry JSON serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +45,9 @@ pub struct DownloadHistoryEntryDto {
     pub preset: DownloadPresetDto,
     pub destination_path: String,
     pub completed_at: u64,
+    /// Download directory recorded with the entry; absent on pre-2.5 entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
 }
 
 impl TryFrom<DownloadHistoryEntryDto> for DownloadHistoryEntry {
@@ -44,7 +59,7 @@ impl TryFrom<DownloadHistoryEntryDto> for DownloadHistoryEntry {
         let source_url = MediaUrl::parse(&dto.source_url)?;
         let preset = DownloadPreset::try_from(dto.preset)?;
 
-        DownloadHistoryEntry::reconstruct(
+        DownloadHistoryEntry::reconstruct_with_dir(
             id,
             download_id,
             source_url,
@@ -52,6 +67,7 @@ impl TryFrom<DownloadHistoryEntryDto> for DownloadHistoryEntry {
             preset,
             dto.destination_path,
             dto.completed_at,
+            dto.download_dir,
         )
     }
 }
@@ -66,6 +82,7 @@ impl From<&DownloadHistoryEntry> for DownloadHistoryEntryDto {
             preset: DownloadPresetDto::from(&entry.preset()),
             destination_path: entry.destination_path().to_string(),
             completed_at: entry.completed_at(),
+            download_dir: entry.download_dir().map(str::to_string),
         }
     }
 }
@@ -120,6 +137,41 @@ impl JsonDownloadHistoryRepository {
     #[must_use]
     pub fn history_file(&self) -> &Path {
         &self.ndjson_file
+    }
+
+    /// Deletes the oldest `.rejected_*` backups, keeping at most [`MAX_REJECTED_BACKUPS`].
+    ///
+    /// Backups accumulate whenever corrupted lines are encountered; without a
+    /// bound they would grow forever.
+    async fn prune_rejected_backups(&self) {
+        let prefix = format!("{NDJSON_HISTORY_FILE_NAME}.rejected_");
+        let Ok(mut read_dir) = tokio::fs::read_dir(&self.config_dir).await else {
+            return;
+        };
+
+        let mut backups: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) {
+                let modified = entry
+                    .metadata()
+                    .await
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                backups.push((modified, entry.path()));
+            }
+        }
+
+        if backups.len() <= MAX_REJECTED_BACKUPS {
+            return;
+        }
+
+        // Newest first; remove everything past the retention limit.
+        backups.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+        for (_, path) in backups.into_iter().skip(MAX_REJECTED_BACKUPS) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 
     /// Migrates legacy JSON history file to NDJSON format if present.
@@ -195,27 +247,45 @@ impl JsonDownloadHistoryRepository {
 
             op_count += 1;
             match serde_json::from_str::<HistoryJournalOp>(line) {
-                Ok(op) => match op {
-                    HistoryJournalOp::Upsert { entry, .. } => {
-                        match DownloadHistoryEntry::try_from(entry) {
-                            Ok(validated) => {
-                                // De-duplicate by both entry id and download_id
-                                live_map.retain(|_, v| v.download_id() != validated.download_id());
-                                live_map.insert(validated.id().as_str().to_string(), validated);
-                            }
-                            Err(val_err) => {
-                                eprintln!(
-                                    "[PolySaver History] Invalid entry line {}: {val_err}",
-                                    idx + 1
-                                );
-                                rejected_lines.push(line.to_string());
+                Ok(op) => {
+                    // Reject documents written by an unknown future schema version
+                    // instead of silently misinterpreting their fields.
+                    let version = match &op {
+                        HistoryJournalOp::Upsert { v, .. } | HistoryJournalOp::Remove { v, .. } => {
+                            *v
+                        }
+                    };
+                    if version > HISTORY_SCHEMA_VERSION {
+                        eprintln!(
+                            "[PolySaver History] Unsupported journal schema version {version} at line {}",
+                            idx + 1
+                        );
+                        rejected_lines.push(line.to_string());
+                        continue;
+                    }
+                    match op {
+                        HistoryJournalOp::Upsert { entry, .. } => {
+                            match DownloadHistoryEntry::try_from(entry) {
+                                Ok(validated) => {
+                                    // De-duplicate by both entry id and download_id
+                                    live_map
+                                        .retain(|_, v| v.download_id() != validated.download_id());
+                                    live_map.insert(validated.id().as_str().to_string(), validated);
+                                }
+                                Err(val_err) => {
+                                    eprintln!(
+                                        "[PolySaver History] Invalid entry line {}: {val_err}",
+                                        idx + 1
+                                    );
+                                    rejected_lines.push(line.to_string());
+                                }
                             }
                         }
+                        HistoryJournalOp::Remove { id, .. } => {
+                            live_map.remove(&id);
+                        }
                     }
-                    HistoryJournalOp::Remove { id, .. } => {
-                        live_map.remove(&id);
-                    }
-                },
+                }
                 Err(parse_err) => {
                     // If this is the last line in the file, it could be an incomplete write from a sudden crash/power loss
                     if idx + 1 == total_lines {
@@ -233,14 +303,12 @@ impl JsonDownloadHistoryRepository {
 
         // Export rejected lines if any complete line was corrupted
         if !rejected_lines.is_empty() {
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let rejected_backup = self
-                .config_dir
-                .join(format!("{NDJSON_HISTORY_FILE_NAME}.rejected_{timestamp}"));
+            let rejected_backup = self.config_dir.join(format!(
+                "{NDJSON_HISTORY_FILE_NAME}.rejected_{}",
+                unique_suffix()
+            ));
             let _ = tokio::fs::write(&rejected_backup, rejected_lines.join("\n").as_bytes()).await;
+            self.prune_rejected_backups().await;
         }
 
         let mut entries: Vec<DownloadHistoryEntry> = live_map.into_values().collect();
@@ -285,14 +353,28 @@ impl JsonDownloadHistoryRepository {
             Uuid::new_v4()
         ));
 
-        tokio::fs::write(&tmp_file, payload.as_bytes())
-            .await
-            .map_err(|err| {
-                CoreError::StorageError(format!(
-                    "Failed to write compacted history file '{}': {err}",
-                    tmp_file.display()
-                ))
-            })?;
+        // Write + fsync before the rename so the compacted file is durable.
+        let mut handle = tokio::fs::File::create(&tmp_file).await.map_err(|err| {
+            CoreError::StorageError(format!(
+                "Failed to create compacted history file '{}': {err}",
+                tmp_file.display()
+            ))
+        })?;
+        if let Err(err) = handle.write_all(payload.as_bytes()).await {
+            let _ = tokio::fs::remove_file(&tmp_file).await;
+            return Err(CoreError::StorageError(format!(
+                "Failed to write compacted history file '{}': {err}",
+                tmp_file.display()
+            )));
+        }
+        if let Err(err) = handle.sync_all().await {
+            let _ = tokio::fs::remove_file(&tmp_file).await;
+            return Err(CoreError::StorageError(format!(
+                "Failed to flush compacted history file '{}': {err}",
+                tmp_file.display()
+            )));
+        }
+        drop(handle);
 
         tokio::fs::rename(&tmp_file, &self.ndjson_file)
             .await
@@ -302,6 +384,11 @@ impl JsonDownloadHistoryRepository {
                     "Failed to atomically rename compacted history file: {err}"
                 ))
             })?;
+
+        // fsync the directory so the rename itself survives a crash.
+        if let Ok(dir) = std::fs::File::open(&self.config_dir) {
+            let _ = dir.sync_all();
+        }
 
         Ok(())
     }
@@ -341,6 +428,12 @@ impl JsonDownloadHistoryRepository {
 
         file.flush().await.map_err(|err| {
             CoreError::StorageError(format!("Failed to flush history journal: {err}"))
+        })?;
+
+        // Durability: without fsync a `kill -9` right after a confirmed append
+        // could lose the last entry.
+        file.sync_all().await.map_err(|err| {
+            CoreError::StorageError(format!("Failed to flush history journal to disk: {err}"))
         })?;
 
         Ok(())
@@ -437,6 +530,29 @@ mod tests {
     use super::*;
     use polysaver_core::domain::format::{OutputFormat, VideoQuality};
 
+    /// Builds an absolute path valid on every platform: a Unix-looking literal is
+    /// not absolute under Windows, and the domain validates destination paths.
+    fn abs_path(suffix: &str) -> String {
+        abs_path_os().join(suffix).to_string_lossy().to_string()
+    }
+
+    /// Absolute path whose text form is safe inside a JSON string literal.
+    ///
+    /// A Windows path contains backslashes, which JSON reads as escape sequences
+    /// (`\p` is invalid), so the forward-slash form is used instead: still
+    /// absolute on Windows, and it needs no escaping.
+    fn abs_path_json(suffix: &str) -> String {
+        abs_path_os()
+            .join(suffix)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    /// Platform-appropriate base directory for path fixtures.
+    fn abs_path_os() -> std::path::PathBuf {
+        std::env::temp_dir().join("polysaver_test")
+    }
+
     #[tokio::test]
     async fn test_ndjson_history_append_load_remove_compaction() {
         let temp_dir = std::env::temp_dir().join(format!("ndjson_test_{}", Uuid::new_v4()));
@@ -452,7 +568,7 @@ mod tests {
             url.clone(),
             "Video 1".to_string(),
             preset,
-            "/path/to/video1.mp4".to_string(),
+            abs_path("path/to/video1.mp4"),
             Some(1000),
         )
         .unwrap();
@@ -462,7 +578,7 @@ mod tests {
             url.clone(),
             "Video 2".to_string(),
             preset,
-            "/path/to/video2.mp4".to_string(),
+            abs_path("path/to/video2.mp4"),
             Some(2000),
         )
         .unwrap();
@@ -508,7 +624,7 @@ mod tests {
             url,
             "Valid Entry".to_string(),
             preset,
-            "/path/to/valid.mp4".to_string(),
+            abs_path("path/to/valid.mp4"),
             Some(5000),
         )
         .unwrap();
@@ -553,11 +669,13 @@ mod tests {
                         "format": "mp4",
                         "videoQuality": "p1080"
                     },
-                    "destinationPath": "/tmp/legacy.mp4",
+                    "destinationPath": "LEGACY_PATH_PLACEHOLDER",
                     "completedAt": 1700000000
                 }
             ]
         }"#;
+        let legacy_json =
+            legacy_json.replace("LEGACY_PATH_PLACEHOLDER", &abs_path_json("legacy.mp4"));
         tokio::fs::write(&legacy_file, legacy_json.as_bytes())
             .await
             .unwrap();
@@ -575,6 +693,67 @@ mod tests {
         assert!(temp_dir
             .join(format!("{LEGACY_JSON_HISTORY_FILE_NAME}.migrated"))
             .exists());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    /// Rejected-line backups must be bounded and uniquely named.
+    #[tokio::test]
+    async fn test_rejected_backups_are_bounded_and_unique() {
+        let temp_dir = std::env::temp_dir().join(format!("ndjson_reject_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let repo = JsonDownloadHistoryRepository::new(&temp_dir);
+
+        // Each load encounters a corrupted complete (non-trailing) line and
+        // produces one backup file.
+        for _ in 0..(MAX_REJECTED_BACKUPS + 3) {
+            let payload = "{\"op\":\"upsert\",\"v\":1,\"entry\":{\"id\":\"broken\n{\"op\":\"remove\",\"v\":1,\"id\":\"91a6136d-1bf9-4700-be4c-f0505c210d65\"}\n";
+            tokio::fs::write(repo.history_file(), payload.as_bytes())
+                .await
+                .unwrap();
+            let _ = repo.load().await.unwrap();
+        }
+
+        let prefix = format!("{NDJSON_HISTORY_FILE_NAME}.rejected_");
+        let mut backups = Vec::new();
+        let mut entries = tokio::fs::read_dir(&temp_dir).await.unwrap();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) {
+                backups.push(name);
+            }
+        }
+
+        assert!(
+            backups.len() <= MAX_REJECTED_BACKUPS,
+            "expected at most {MAX_REJECTED_BACKUPS} backups, got {}",
+            backups.len()
+        );
+        // Names carry a millisecond timestamp and a random suffix (no collision).
+        let unique: std::collections::HashSet<_> = backups.iter().collect();
+        assert_eq!(unique.len(), backups.len());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    /// A journal written by an unknown future schema version is rejected explicitly.
+    #[tokio::test]
+    async fn test_unknown_journal_schema_version_is_rejected() {
+        let temp_dir = std::env::temp_dir().join(format!("ndjson_version_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let repo = JsonDownloadHistoryRepository::new(&temp_dir);
+        let future_doc = "{\"op\":\"upsert\",\"v\":99,\"entry\":{\"id\":\"e81792bc-7095-46ff-b4e8-db2bb82a7a40\",\"downloadId\":\"91a6136d-1bf9-4700-be4c-f0505c210d65\",\"sourceUrl\":\"https://www.youtube.com/watch?v=dQw4w9WgXcQ\",\"title\":\"Future\",\"preset\":{\"format\":\"mp4\",\"videoQuality\":\"p1080\"},\"destinationPath\":\"/tmp/future.mp4\",\"completedAt\":1}}\n";
+        tokio::fs::write(repo.history_file(), future_doc.as_bytes())
+            .await
+            .unwrap();
+
+        let loaded = repo.load().await.unwrap();
+        assert!(
+            loaded.is_empty(),
+            "entries from an unknown schema version must not be loaded silently"
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

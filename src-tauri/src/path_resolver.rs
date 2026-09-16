@@ -98,87 +98,110 @@ pub fn resolve_user_directory(raw: &str, home_dir: &Path) -> Result<PathBuf, Ipc
 mod tests {
     use super::*;
 
+    /// Fake home directory that is absolute on every platform.
+    ///
+    /// A literal like `/Users/alice` is absolute on Unix but *not* on Windows,
+    /// where the resolver (rightly) rejects it as a relative path.
+    fn fake_home() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\Users\alice")
+        } else {
+            PathBuf::from("/Users/alice")
+        }
+    }
+
+    /// Builds an absolute path valid on every platform.
+    fn abs_path(suffix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!(r"C:\polysaver_test\{}", suffix.replace('/', r"\")))
+        } else {
+            PathBuf::from(format!("/polysaver_test/{suffix}"))
+        }
+    }
+
     #[test]
     fn test_resolve_tilde_only() {
-        let fake_home = Path::new("/Users/alice");
-        let res = resolve_user_directory("~", fake_home).unwrap();
-        assert_eq!(res, PathBuf::from("/Users/alice"));
+        let home = fake_home();
+        let res = resolve_user_directory("~", &home).unwrap();
+        assert_eq!(res, home);
 
-        let res_spaced = resolve_user_directory("  ~  ", fake_home).unwrap();
-        assert_eq!(res_spaced, PathBuf::from("/Users/alice"));
+        let res_spaced = resolve_user_directory("  ~  ", &home).unwrap();
+        assert_eq!(res_spaced, home);
     }
 
     #[test]
     fn test_resolve_tilde_subdirectories() {
-        let fake_home = Path::new("/Users/alice");
+        let home = fake_home();
 
-        // ~/documents -> /Users/alice/documents (never /documents)
-        let res1 = resolve_user_directory("~/documents", fake_home).unwrap();
-        assert_eq!(res1, PathBuf::from("/Users/alice/documents"));
+        // ~/documents -> <home>/documents (never a root-level /documents)
+        let res1 = resolve_user_directory("~/documents", &home).unwrap();
+        assert_eq!(res1, home.join("documents"));
         assert_ne!(res1, PathBuf::from("/documents"));
 
         // ~/Documents/PolySaver
-        let res2 = resolve_user_directory("~/Documents/PolySaver", fake_home).unwrap();
-        assert_eq!(res2, PathBuf::from("/Users/alice/Documents/PolySaver"));
+        let res2 = resolve_user_directory("~/Documents/PolySaver", &home).unwrap();
+        assert_eq!(res2, home.join("Documents").join("PolySaver"));
 
         // Windows backslash notation ~\Downloads\PolySaver
-        let res3 = resolve_user_directory(r"~\Downloads\PolySaver", fake_home).unwrap();
-        assert_eq!(res3, fake_home.join(Path::new(r"Downloads\PolySaver")));
+        let res3 = resolve_user_directory(r"~\Downloads\PolySaver", &home).unwrap();
+        assert_eq!(res3, home.join(Path::new(r"Downloads\PolySaver")));
     }
 
     #[test]
     fn test_reject_invalid_tilde_forms() {
-        let fake_home = Path::new("/Users/alice");
+        let home = fake_home();
 
         // ~other rejected
-        let err1 = resolve_user_directory("~other", fake_home);
+        let err1 = resolve_user_directory("~other", &home);
         assert!(err1.is_err());
         assert_eq!(err1.unwrap_err().code, "INVALID_DIRECTORY");
 
         // embedded tilde rejected
-        let err2 = resolve_user_directory("abc/~/test", fake_home);
+        let err2 = resolve_user_directory("abc/~/test", &home);
         assert!(err2.is_err());
         assert_eq!(err2.unwrap_err().code, "INVALID_DIRECTORY");
     }
 
     #[test]
     fn test_reject_relative_paths_and_empty() {
-        let fake_home = Path::new("/Users/alice");
+        let home = fake_home();
 
         // empty
-        assert!(resolve_user_directory("", fake_home).is_err());
-        assert!(resolve_user_directory("   ", fake_home).is_err());
+        assert!(resolve_user_directory("", &home).is_err());
+        assert!(resolve_user_directory("   ", &home).is_err());
 
         // relative
-        assert!(resolve_user_directory("documents", fake_home).is_err());
-        assert!(resolve_user_directory("../documents", fake_home).is_err());
-        assert!(resolve_user_directory("./downloads", fake_home).is_err());
+        assert!(resolve_user_directory("documents", &home).is_err());
+        assert!(resolve_user_directory("../documents", &home).is_err());
+        assert!(resolve_user_directory("./downloads", &home).is_err());
 
         // null byte
-        assert!(resolve_user_directory("/Users/alice/\0danger", fake_home).is_err());
+        let with_null = format!("{}/\0danger", home.display());
+        assert!(resolve_user_directory(&with_null, &home).is_err());
     }
 
     #[test]
     fn test_reject_tilde_escaping_home() {
-        let fake_home = Path::new("/Users/alice");
+        let home = fake_home();
 
-        // ~/../Shared escapes /Users/alice
-        let err = resolve_user_directory("~/../Shared", fake_home);
+        // ~/../Shared escapes the home directory
+        let err = resolve_user_directory("~/../Shared", &home);
         assert!(err.is_err());
         assert_eq!(err.unwrap_err().code, "INVALID_DIRECTORY");
     }
 
     #[test]
     fn test_preserve_explicit_absolute_paths() {
-        let fake_home = Path::new("/Users/alice");
+        let home = fake_home();
 
-        // External drive
-        let external = "/Volumes/ExternalSSD/PolySaver";
-        let res1 = resolve_user_directory(external, fake_home).unwrap();
-        assert_eq!(res1, PathBuf::from("/Volumes/ExternalSSD/PolySaver"));
+        // External volume, passed through untouched
+        let external = abs_path("Volumes/ExternalSSD/PolySaver");
+        let res1 = resolve_user_directory(&external.to_string_lossy(), &home).unwrap();
+        assert_eq!(res1, external);
 
-        // Another absolute path with lexical normalization
-        let res2 = resolve_user_directory("/opt/storage/./media/../media/vids", fake_home).unwrap();
-        assert_eq!(res2, PathBuf::from("/opt/storage/media/vids"));
+        // Another absolute path, with lexical normalization of `.` and `..`
+        let messy = abs_path("storage/./media/../media/vids");
+        let res2 = resolve_user_directory(&messy.to_string_lossy(), &home).unwrap();
+        assert_eq!(res2, abs_path("storage/media/vids"));
     }
 }

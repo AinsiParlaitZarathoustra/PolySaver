@@ -6,7 +6,8 @@ use polysaver_core::domain::download_job::DownloadId;
 use polysaver_core::domain::history::{DownloadHistoryEntry, HistoryEntryId};
 use polysaver_core::domain::{
     AppSettings, AppSettingsDto, DownloadJob, DownloadPreset, DownloadPresetDto, DownloadStatus,
-    Language, MediaUrl, Mp3Quality, OutputFormat, ThemeMode, VideoQuality,
+    Language, MediaUrl, MediaUrlKind, Mp3Quality, OutputFormat, ThemeMode, VideoQuality,
+    MAX_PLAYLIST_DOWNLOADS,
 };
 use polysaver_core::error::{CoreError, DownloadErrorDetails};
 use polysaver_core::ports::event_sink::EventSink;
@@ -16,10 +17,95 @@ use polysaver_core::ports::{
     ConvertRequest, DownloadStreamRequest, DownloadedStreams, MediaConverter, MediaDownloader,
     SettingsRepository, StreamProgress,
 };
-use polysaver_core::services::StartDownloadService;
+use polysaver_core::services::{RetryPolicy, StartDownloadService};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Builds an absolute path that is valid on every platform.
+///
+/// `/home/user/x` is absolute on Unix but **not** on Windows, so tests that feed
+/// paths into validated domain objects must not hardcode a Unix literal. The
+/// domain's `is_absolute` check is what makes this matter: a relative-looking
+/// literal turns a passing test into a `ValidationError` on the Windows runner.
+fn abs_path(suffix: &str) -> String {
+    abs_path_os().join(suffix).to_string_lossy().to_string()
+}
+
+/// Absolute path whose text form is safe inside a JSON string literal.
+///
+/// A Windows path contains backslashes, which JSON would interpret as escape
+/// sequences (`\p` is not valid), so the forward-slash form is used: it is still
+/// an absolute path on Windows and requires no escaping.
+fn abs_path_json(suffix: &str) -> String {
+    abs_path_os()
+        .join(suffix)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Platform-appropriate base directory for path fixtures.
+fn abs_path_os() -> std::path::PathBuf {
+    // `temp_dir()` is guaranteed absolute and exists on every platform, which
+    // makes it a sounder fixture root than any hand-written literal.
+    std::env::temp_dir().join("polysaver_test")
+}
+
+/// Polls `check` until it returns true or `timeout` elapses.
+///
+/// The download pipeline runs in a background task, so tests must wait for a
+/// state instead of sleeping a fixed amount: a fixed sleep is flaky whenever the
+/// CI runner is slower than the development machine (this is what made the Linux
+/// leg fail while macOS passed).
+async fn wait_until<F, Fut>(mut check: F, timeout: std::time::Duration) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if check().await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits (up to 10 s) for a job to reach any terminal state.
+async fn wait_for_terminal(
+    service: &StartDownloadService,
+    job_id: polysaver_core::domain::DownloadId,
+) {
+    let reached = wait_until(
+        || async {
+            service
+                .list_downloads()
+                .await
+                .iter()
+                .find(|j| j.id() == job_id)
+                .is_some_and(|j| j.is_terminal())
+        },
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        reached,
+        "job {job_id} did not reach a terminal state in time"
+    );
+}
+
+/// Waits (up to 10 s) for the history repository to contain at least one entry.
+async fn wait_for_history(service: &StartDownloadService) {
+    let recorded = wait_until(
+        || async { service.list_history().await.is_ok_and(|h| !h.is_empty()) },
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+    assert!(recorded, "no history entry was recorded in time");
+}
 
 // 1. OutputFormat all 4 variants accepted
 #[test]
@@ -116,30 +202,92 @@ fn test_video_format_with_audio_quality_rejected_via_dto() {
     assert!(matches!(result, Err(CoreError::InvalidSettings(_))));
 }
 
-// 9. Playlist URLs rejected
+// 9. Playlist URLs are classified, not rejected
 #[test]
-fn test_playlist_urls_rejected() {
-    let list_param = MediaUrl::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL12345");
-    assert!(matches!(
-        list_param,
-        Err(CoreError::PlaylistNotSupported(_))
-    ));
-    assert_eq!(
-        list_param.unwrap_err().machine_code(),
-        "PLAYLIST_NOT_SUPPORTED"
-    );
+fn test_playlist_urls_are_classified_as_playlists() {
+    // A bare `list=` (no explicit video id) is a playlist.
+    let list_only = MediaUrl::parse("https://www.youtube.com/playlist?list=PL12345")
+        .expect("playlist URL must be accepted");
+    assert_eq!(list_only.kind(), MediaUrlKind::Playlist);
 
-    let playlist_path = MediaUrl::parse("https://www.youtube.com/playlist?list=PL12345");
-    assert!(matches!(
-        playlist_path,
-        Err(CoreError::PlaylistNotSupported(_))
-    ));
+    let channel_path = MediaUrl::parse("https://www.youtube.com/channel/UC12345678")
+        .expect("channel URL must be accepted");
+    assert_eq!(channel_path.kind(), MediaUrlKind::Playlist);
 
-    let channel_path = MediaUrl::parse("https://www.youtube.com/channel/UC12345678");
-    assert!(matches!(
-        channel_path,
-        Err(CoreError::PlaylistNotSupported(_))
-    ));
+    // Channels and their sub-pages all resolve to the playlist flow.
+    for raw in [
+        "https://www.youtube.com/@handle",
+        "https://www.youtube.com/@handle/videos",
+        "https://www.youtube.com/@handle/streams",
+        "https://www.youtube.com/c/SomeChannel",
+        "https://www.youtube.com/user/SomeUser",
+        "https://soundcloud.com/artist/sets/album",
+    ] {
+        let url = MediaUrl::parse(raw).expect("listing URL must be accepted");
+        assert_eq!(
+            url.kind(),
+            MediaUrlKind::Playlist,
+            "expected playlist for {raw}"
+        );
+    }
+
+    // `list=` is a YouTube convention. Elsewhere it is an ordinary query parameter
+    // (pagination, sorting, tracking) and must NOT switch the app into playlist
+    // mode, otherwise the green button would be wrongly disabled.
+    for raw in [
+        "https://example.com/feed?list=abc",
+        "https://vimeo.com/12345?list=xyz",
+        "https://example.com/gallery?page=2&list=items",
+    ] {
+        let url = MediaUrl::parse(raw).expect("URL must be accepted");
+        assert_eq!(
+            url.kind(),
+            MediaUrlKind::Single,
+            "list= must not imply a playlist outside YouTube: {raw}"
+        );
+    }
+
+    // A watch URL carrying a share `list=` stays a single video, and the parameter is
+    // dropped so the download pipeline cannot accidentally follow the playlist.
+    let shared = MediaUrl::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL12345")
+        .expect("share URL must be accepted");
+    assert_eq!(shared.kind(), MediaUrlKind::Single);
+    assert!(!shared.as_str().contains("list="));
+    assert!(shared.as_str().contains("v=dQw4w9WgXcQ"));
+    assert!(!shared.is_playlist());
+
+    // Other query parameters are preserved by the normalization.
+    let with_extra = MediaUrl::parse("https://www.youtube.com/watch?v=abc&t=42&list=PL9")
+        .expect("share URL with extra params must be accepted");
+    assert_eq!(with_extra.kind(), MediaUrlKind::Single);
+    assert!(with_extra.as_str().contains("t=42"));
+    assert!(!with_extra.as_str().contains("list="));
+
+    // Plain videos are single.
+    let plain = MediaUrl::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        .expect("video URL must be accepted");
+    assert_eq!(plain.kind(), MediaUrlKind::Single);
+}
+
+// 9b. Dangerous URLs stay rejected after the playlist change
+#[test]
+fn test_playlist_support_does_not_weaken_url_validation() {
+    for raw in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "http://127.0.0.1/playlist?list=PL1",
+        "http://localhost/playlist?list=PL1",
+        "http://10.0.0.5/@handle",
+        "http://[::1]/channel/UC1",
+        "https://user:pass@youtube.com/playlist?list=PL1",
+        "http://169.254.169.254/latest/meta-data",
+        "https://youtube.com.evil.local/playlist?list=PL1",
+    ] {
+        assert!(
+            MediaUrl::parse(raw).is_err(),
+            "dangerous URL must stay rejected: {raw}"
+        );
+    }
 }
 
 // 10. Valid URLs accepted
@@ -167,81 +315,199 @@ fn test_disallowed_urls_rejected() {
     ));
 }
 
-// 12. Concurrency policies in AppSettings
+// 11b. Local, private, and reserved hosts rejected (SSRF hardening)
 #[test]
-fn test_app_settings_concurrency_policies() {
-    let parallel_off = AppSettings::new(
-        "/home/user/downloads".to_string(),
+fn test_local_and_reserved_hosts_rejected() {
+    let rejected = [
+        "http://127.0.0.1/x",
+        "http://127.1.2.3/x",
+        "http://localhost/x",
+        "http://localhost:8080/x",
+        "http://foo.localhost/x",
+        "http://printer.local/x",
+        "http://service.internal/x",
+        "http://0.1.2.3/x",
+        "http://10.1.2.3/x",
+        "http://172.16.0.1/x",
+        "http://172.31.255.255/x",
+        "http://192.168.1.10/x",
+        "http://169.254.169.254/x",
+        "http://100.64.0.1/x",
+        "http://198.18.0.1/x",
+        "http://192.0.2.10/x",
+        "http://198.51.100.7/x",
+        "http://203.0.113.9/x",
+        "http://240.0.0.1/x",
+        "http://224.0.0.1/x",
+        "http://[::1]/x",
+        "http://[::]/x",
+        "http://[fc00::1]/x",
+        "http://[fe80::1]/x",
+        "http://[2001:db8::1]/x",
+        "http://[ff02::1]/x",
+        "http://[::ffff:127.0.0.1]/x",
+        "http://[::ffff:10.0.0.1]/x",
+        // Credentials can hide the real host; always refused.
+        "https://user:pass@example.com/video",
+        "https://github.com@127.0.0.1/x",
+    ];
+    for raw in rejected {
+        assert!(
+            matches!(MediaUrl::parse(raw), Err(CoreError::InvalidUrl(_))),
+            "expected '{raw}' to be rejected"
+        );
+    }
+
+    // Public hosts remain accepted.
+    let accepted = [
+        "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "http://example.com/video.mp4",
+        "https://140.82.121.4/x",
+        "https://[2606:50c0:8000::153]/x",
+    ];
+    for raw in accepted {
+        assert!(
+            MediaUrl::parse(raw).is_ok(),
+            "expected '{raw}' to be accepted"
+        );
+    }
+}
+
+// 12. AppSettings path invariants
+#[test]
+fn test_app_settings_path_policies() {
+    let video_settings = AppSettings::new(
+        abs_path("home/user/downloads"),
         ThemeMode::Dark,
-        false, // parallel disabled
         DownloadPreset::default(),
-        3,
         Language::French,
     )
     .unwrap();
-    assert_eq!(parallel_off.effective_max_concurrent(), 1);
-    assert_eq!(parallel_off.effective_parallel_segments(), 1);
+    assert_eq!(
+        video_settings.download_directory(),
+        abs_path("home/user/downloads")
+    );
+    assert_eq!(video_settings.theme_mode(), ThemeMode::Dark);
 
-    let parallel_on = AppSettings::new(
-        "/home/user/downloads".to_string(),
+    let audio_settings = AppSettings::new(
+        abs_path("home/user/downloads"),
         ThemeMode::Light,
-        true, // parallel enabled
-        DownloadPreset::default(),
-        5,
+        DownloadPreset::mp3(Mp3Quality::K256),
         Language::English,
     )
     .unwrap();
-    assert_eq!(parallel_on.effective_max_concurrent(), 5);
-    assert_eq!(parallel_on.effective_parallel_segments(), 8);
-
-    // Bounds invariant: max_concurrent must be 1..=8
-    assert!(AppSettings::new(
-        "/home/user/downloads".to_string(),
-        ThemeMode::Dark,
-        true,
-        DownloadPreset::default(),
-        0,
-        Language::French,
-    )
-    .is_err());
-    assert!(AppSettings::new(
-        "/home/user/downloads".to_string(),
-        ThemeMode::Dark,
-        true,
-        DownloadPreset::default(),
-        9,
-        Language::French,
-    )
-    .is_err());
+    assert_eq!(
+        audio_settings.default_preset(),
+        DownloadPreset::mp3(Mp3Quality::K256)
+    );
+    assert_eq!(audio_settings.language(), Language::English);
 
     // Path validation: ~ prefix, relative path, empty path, null bytes rejected
     assert!(AppSettings::new(
         "~/Downloads".to_string(),
         ThemeMode::Dark,
-        true,
         DownloadPreset::default(),
-        3,
         Language::French,
     )
     .is_err());
     assert!(AppSettings::new(
         "relative/path".to_string(),
         ThemeMode::Dark,
-        true,
         DownloadPreset::default(),
-        3,
         Language::French,
     )
     .is_err());
     assert!(AppSettings::new(
-        "/path/with\0null".to_string(),
+        abs_path("path/with\0null"),
         ThemeMode::Dark,
-        true,
         DownloadPreset::default(),
-        3,
         Language::French,
     )
     .is_err());
+    assert!(AppSettings::new(
+        "   ".to_string(),
+        ThemeMode::Dark,
+        DownloadPreset::default(),
+        Language::French,
+    )
+    .is_err());
+}
+
+// 12b. Cookie source and engine channel: closed enums, safe defaults, persistence
+#[test]
+fn test_settings_cookies_and_engine_channel() {
+    use polysaver_core::domain::{CookiesBrowser, EngineChannel};
+
+    let defaults = AppSettings::defaults_for(abs_path("downloads")).unwrap();
+    assert_eq!(defaults.cookies_from_browser(), None);
+    assert_eq!(defaults.engine_channel(), EngineChannel::Stable);
+
+    // A configured browser is carried through the DTO round-trip.
+    let settings = AppSettings::new(
+        abs_path("downloads"),
+        ThemeMode::System,
+        DownloadPreset::default(),
+        Language::French,
+    )
+    .unwrap()
+    .with_cookies_from_browser(Some(CookiesBrowser::Firefox))
+    .with_engine_channel(EngineChannel::Nightly);
+
+    let dto = AppSettingsDto::from(&settings);
+    assert_eq!(dto.cookies_from_browser, Some(CookiesBrowser::Firefox));
+    assert_eq!(dto.engine_channel, EngineChannel::Nightly);
+    assert_eq!(dto.schema_version, 1);
+
+    let round_tripped = AppSettings::try_from(dto).unwrap();
+    assert_eq!(
+        round_tripped.cookies_from_browser(),
+        Some(CookiesBrowser::Firefox)
+    );
+    assert_eq!(round_tripped.engine_channel(), EngineChannel::Nightly);
+
+    // Every supported browser serializes to the exact yt-dlp flag value.
+    let names = [
+        CookiesBrowser::Brave,
+        CookiesBrowser::Chrome,
+        CookiesBrowser::Chromium,
+        CookiesBrowser::Edge,
+        CookiesBrowser::Firefox,
+        CookiesBrowser::Opera,
+        CookiesBrowser::Safari,
+        CookiesBrowser::Vivaldi,
+        CookiesBrowser::Whale,
+    ];
+    for browser in names {
+        let json = serde_json::to_string(&browser).unwrap();
+        assert_eq!(json, format!("\"{}\"", browser.as_str()));
+        // Round-trip through untrusted-deserialization path.
+        let parsed: CookiesBrowser = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, browser);
+    }
+
+    // Unknown values are rejected by the closed enum (no argument injection).
+    assert!(serde_json::from_str::<CookiesBrowser>("\"firefox:profile\"").is_err());
+    assert!(serde_json::from_str::<CookiesBrowser>("\"--exec=rm -rf\"").is_err());
+    assert!(serde_json::from_str::<CookiesBrowser>("\"unknown-browser\"").is_err());
+    assert!(serde_json::from_str::<EngineChannel>("\"beta\"").is_err());
+
+    // Legacy settings.json without the new keys stays loadable.
+    let legacy = format!(
+        r#"{{
+        "downloadDirectory": "{}",
+        "themeMode": "system",
+        "defaultPreset": {{ "format": "mp4", "videoQuality": "p1080" }}
+    }}"#,
+        abs_path_json("downloads")
+    );
+    let legacy_dto: AppSettingsDto = serde_json::from_str(&legacy).unwrap();
+    assert_eq!(legacy_dto.cookies_from_browser, None);
+    assert_eq!(legacy_dto.engine_channel, EngineChannel::Stable);
+    assert_eq!(
+        legacy_dto.schema_version, 0,
+        "absent schema version means pre-versioning"
+    );
+    assert!(AppSettings::try_from(legacy_dto).is_ok());
 }
 
 // 13. DownloadJob lifecycle transitions and monotonicity
@@ -276,11 +542,14 @@ fn test_download_job_lifecycle() {
     job.transition_to_finalizing().unwrap();
     assert_eq!(job.status(), DownloadStatus::Finalizing);
 
-    job.transition_to_completed("/output/video.mp4".to_string())
+    job.transition_to_completed(abs_path("output/video.mp4"))
         .unwrap();
     assert_eq!(job.status(), DownloadStatus::Completed);
     assert_eq!(job.progress_percent(), None);
-    assert_eq!(job.destination_path(), Some("/output/video.mp4"));
+    assert_eq!(
+        job.destination_path(),
+        Some(abs_path("output/video.mp4").as_str())
+    );
     assert!(job.is_terminal());
 
     // Terminal job cannot be mutated
@@ -304,6 +573,8 @@ impl MediaDownloader for FakeDownloader {
             audio_path: None,
             title: "Test Video".to_string(),
             duration_seconds: Some(100),
+            engine_outdated: false,
+            cookies_diagnostic: None,
         })
     }
 }
@@ -398,9 +669,7 @@ async fn test_start_download_service_uses_default_preset_and_custom_override() {
     let settings = AppSettings::new(
         download_dir.to_string_lossy().to_string(),
         ThemeMode::Dark,
-        false,
         DownloadPreset::mp3(Mp3Quality::K320),
-        3,
         Language::French,
     )
     .unwrap();
@@ -446,8 +715,8 @@ async fn test_start_download_service_uses_default_preset_and_custom_override() {
         DownloadPreset::mp3(Mp3Quality::K320)
     );
 
-    // Give background task time to complete and record history
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Give the background task time to complete and record history.
+    wait_for_history(&service).await;
     let history = service.list_history().await.unwrap();
     assert!(!history.is_empty());
 
@@ -476,7 +745,7 @@ async fn test_failing_downloader_transitions_to_failed() {
     });
     let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
 
-    let service = StartDownloadService::new(
+    let service = StartDownloadService::new_with_retry_policy(
         Arc::new(FailingDownloader),
         Arc::new(FakeConverter),
         Arc::new(FakeInspector),
@@ -484,6 +753,7 @@ async fn test_failing_downloader_transitions_to_failed() {
         history_repo,
         None,
         test_dir.join("temp"),
+        RetryPolicy::immediate(),
     );
 
     let job = service
@@ -491,8 +761,8 @@ async fn test_failing_downloader_transitions_to_failed() {
         .await
         .unwrap();
 
-    // Give background task time to run and fail
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Wait for the background task to reach its terminal state.
+    wait_for_terminal(&service, job.id()).await;
 
     let downloads = service.list_downloads().await;
     let found = downloads.iter().find(|j| j.id() == job.id()).unwrap();
@@ -505,32 +775,151 @@ async fn test_failing_downloader_transitions_to_failed() {
     let _ = tokio::fs::remove_dir_all(&test_dir).await;
 }
 
+// 15b. Retry: failed jobs re-queue with same URL/preset/directory, others refused
+#[tokio::test]
+async fn test_retry_download_only_allows_failed_jobs() {
+    let test_dir = std::env::temp_dir().join(format!("polysaver_retry_{}", uuid::Uuid::new_v4()));
+    let custom_dir = test_dir.join("custom_output");
+    tokio::fs::create_dir_all(&custom_dir).await.unwrap();
+    let settings = AppSettings::defaults_for(test_dir.join("downloads")).unwrap();
+    let repo = Arc::new(InMemorySettingsRepo {
+        settings: RwLock::new(settings),
+    });
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+
+    let service = StartDownloadService::new_with_retry_policy(
+        Arc::new(FailingDownloader),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        repo,
+        history_repo,
+        None,
+        test_dir.join("temp"),
+        RetryPolicy::immediate(),
+    );
+
+    // A job that is not failed (still queued/active) cannot be retried.
+    let queued_job = service
+        .start_download(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            Some(DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P720).unwrap()),
+            Some(custom_dir.clone()),
+        )
+        .await
+        .unwrap();
+    let early_retry = service.retry_download(queued_job.id()).await;
+    assert!(matches!(early_retry, Err(CoreError::InvalidState(_))));
+
+    // Unknown identifiers surface a clear not-found error.
+    let unknown_retry = service
+        .retry_download(polysaver_core::domain::DownloadId::new())
+        .await;
+    assert!(matches!(unknown_retry, Err(CoreError::JobNotFound(_))));
+
+    // Wait for the download to fail, then retry it faithfully.
+    wait_for_terminal(&service, queued_job.id()).await;
+    let failed = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == queued_job.id())
+        .unwrap();
+    assert_eq!(failed.status(), DownloadStatus::Failed);
+    assert_eq!(failed.target_dir(), Some(custom_dir.as_path()));
+
+    let retried = service.retry_download(failed.id()).await.unwrap();
+    assert_ne!(retried.id(), failed.id());
+    assert_eq!(retried.status(), DownloadStatus::Queued);
+    assert_eq!(retried.url(), failed.url());
+    assert_eq!(retried.preset(), failed.preset());
+    assert_eq!(retried.target_dir(), Some(custom_dir.as_path()));
+
+    // The failed entry is gone; only the new queued job remains in memory.
+    let jobs = service.list_downloads().await;
+    assert!(!jobs.iter().any(|j| j.id() == failed.id()));
+    assert!(jobs.iter().any(|j| j.id() == retried.id()));
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+// 15c. Retry never writes history entries, and a failed job never reaches history
+#[tokio::test]
+async fn test_failed_jobs_and_retries_do_not_write_history() {
+    let test_dir =
+        std::env::temp_dir().join(format!("polysaver_retry_hist_{}", uuid::Uuid::new_v4()));
+    let settings = AppSettings::defaults_for(test_dir.join("downloads")).unwrap();
+    let repo = Arc::new(InMemorySettingsRepo {
+        settings: RwLock::new(settings),
+    });
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+
+    let service = StartDownloadService::new_with_retry_policy(
+        Arc::new(FailingDownloader),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        repo,
+        history_repo.clone(),
+        None,
+        test_dir.join("temp"),
+        RetryPolicy::immediate(),
+    );
+
+    let job = service
+        .start_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, None)
+        .await
+        .unwrap();
+    wait_for_terminal(&service, job.id()).await;
+    let failed = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == job.id())
+        .unwrap();
+    assert_eq!(failed.status(), DownloadStatus::Failed);
+
+    let retried = service.retry_download(failed.id()).await.unwrap();
+    wait_for_terminal(&service, retried.id()).await;
+
+    // Failing then retrying (still failing) must not produce any history entry.
+    let history = service.list_history().await.unwrap();
+    assert!(
+        history.is_empty(),
+        "failed jobs must never be recorded in history"
+    );
+    assert!(service
+        .list_downloads()
+        .await
+        .iter()
+        .any(|j| j.id() == retried.id() && j.status() == DownloadStatus::Failed));
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
 // 16. AppSettingsDto TryFrom validation and default System theme mode and French language
 #[test]
 fn test_app_settings_dto_try_from() {
     let dto = AppSettingsDto {
-        download_directory: "/path/to/downloads".to_string(),
+        download_directory: abs_path("path/to/downloads"),
         theme_mode: ThemeMode::System,
-        parallel_downloads: true,
         default_preset: DownloadPresetDto {
             format: OutputFormat::Flac,
             video_quality: None,
             mp3_quality: None,
         },
-        max_concurrent: 4,
         language: Language::English,
+        cookies_from_browser: None,
+        engine_channel: polysaver_core::domain::EngineChannel::Stable,
+        schema_version: 1,
     };
 
     let settings = AppSettings::try_from(dto).unwrap();
-    assert_eq!(settings.download_directory(), "/path/to/downloads");
+    assert_eq!(settings.download_directory(), abs_path("path/to/downloads"));
     assert_eq!(settings.theme_mode(), ThemeMode::System);
-    assert!(settings.parallel_downloads());
     assert_eq!(settings.default_preset(), DownloadPreset::Flac);
-    assert_eq!(settings.max_concurrent(), 4);
     assert_eq!(settings.language(), Language::English);
 
     // Default settings must use ThemeMode::System and Language::French
-    let default_settings = AppSettings::defaults_for("/tmp/downloads").unwrap();
+    let default_settings = AppSettings::defaults_for(abs_path("downloads")).unwrap();
     assert_eq!(default_settings.theme_mode(), ThemeMode::System);
     assert_eq!(default_settings.language(), Language::French);
 }
@@ -554,19 +943,30 @@ fn test_language_serialization_and_defaults() {
     assert_eq!(Language::English.code(), "en");
     assert_eq!(Language::default(), Language::French);
 
-    // Deserialization without language defaults to French
-    let json_without_language = r#"{
-        "downloadDirectory": "/downloads",
+    // Deserialization without language defaults to French.
+    // Legacy `parallelDownloads` / `maxConcurrent` keys from pre-2.5 settings files
+    // must be ignored gracefully for backward compatibility (no migration needed).
+    let json_without_language = format!(
+        r#"{{
+        "downloadDirectory": "{}",
         "themeMode": "system",
         "parallelDownloads": true,
-        "defaultPreset": {
+        "defaultPreset": {{
             "format": "mp3",
             "mp3Quality": "k320"
-        },
+        }},
         "maxConcurrent": 3
-    }"#;
-    let dto: AppSettingsDto = serde_json::from_str(json_without_language).unwrap();
+    }}"#,
+        abs_path_json("downloads")
+    );
+    let dto: AppSettingsDto = serde_json::from_str(&json_without_language).unwrap();
     assert_eq!(dto.language, Language::French);
+    assert_eq!(dto.download_directory, abs_path_json("downloads"));
+    let legacy_settings = AppSettings::try_from(dto).unwrap();
+    assert_eq!(
+        legacy_settings.default_preset(),
+        DownloadPreset::mp3(Mp3Quality::K320)
+    );
 }
 
 // 18. ThemeMode serialization and deserialization
@@ -701,6 +1101,7 @@ fn test_available_video_qualities_filtering_and_sorting() {
             has_audio: false,
             extension: "mhtml".to_string(),
             filesize_approx_bytes: None,
+            tbr: None,
             note: Some("storyboard".to_string()),
         },
         FormatOption {
@@ -710,6 +1111,7 @@ fn test_available_video_qualities_filtering_and_sorting() {
             has_audio: true,
             extension: "m4a".to_string(),
             filesize_approx_bytes: None,
+            tbr: None,
             note: Some("audio".to_string()),
         },
         FormatOption {
@@ -719,6 +1121,7 @@ fn test_available_video_qualities_filtering_and_sorting() {
             has_audio: false,
             extension: "webm".to_string(),
             filesize_approx_bytes: None,
+            tbr: None,
             note: None,
         },
         FormatOption {
@@ -728,6 +1131,7 @@ fn test_available_video_qualities_filtering_and_sorting() {
             has_audio: false,
             extension: "webm".to_string(),
             filesize_approx_bytes: None,
+            tbr: None,
             note: None,
         },
         FormatOption {
@@ -737,6 +1141,7 @@ fn test_available_video_qualities_filtering_and_sorting() {
             has_audio: false,
             extension: "mp4".to_string(),
             filesize_approx_bytes: None,
+            tbr: None,
             note: None,
         },
         FormatOption {
@@ -746,6 +1151,7 @@ fn test_available_video_qualities_filtering_and_sorting() {
             has_audio: false,
             extension: "webm".to_string(),
             filesize_approx_bytes: None,
+            tbr: None,
             note: None,
         },
     ];
@@ -787,10 +1193,16 @@ fn test_media_url_serde_strict_deserialization() {
     // Javascript scheme rejected
     assert!(serde_json::from_str::<MediaUrl>("\"javascript:alert(1)\"").is_err());
 
-    // Playlist URL rejected
-    assert!(
-        serde_json::from_str::<MediaUrl>("\"https://youtube.com/playlist?list=PL123\"").is_err()
-    );
+    // Playlist URL accepted and re-serialized identically
+    let playlist_json = "\"https://youtube.com/playlist?list=PL123\"";
+    let playlist_url = serde_json::from_str::<MediaUrl>(playlist_json).expect("playlist is valid");
+    assert!(playlist_url.is_playlist());
+    assert_eq!(serde_json::to_string(&playlist_url).unwrap(), playlist_json);
+
+    // Local/reserved hosts are rejected through deserialization too
+    // (history entries pointing there are treated as invalid lines).
+    assert!(serde_json::from_str::<MediaUrl>("\"http://127.0.0.1/x\"").is_err());
+    assert!(serde_json::from_str::<MediaUrl>("\"http://localhost/x\"").is_err());
 }
 
 #[tokio::test]
@@ -804,7 +1216,7 @@ async fn test_get_completed_download_path_validation() {
     #[async_trait::async_trait]
     impl SettingsRepository for DummySettingsRepo {
         async fn load(&self) -> Result<AppSettings, CoreError> {
-            AppSettings::defaults_for("/tmp/downloads")
+            AppSettings::defaults_for(abs_path("downloads"))
         }
         async fn save(&self, _: &AppSettings) -> Result<(), CoreError> {
             Ok(())
@@ -850,13 +1262,13 @@ async fn test_download_history_entry_invariants_and_actions() {
         url.clone(),
         "  Me at the zoo  ".to_string(),
         preset,
-        "/downloads/zoo.mp4".to_string(),
+        abs_path("downloads/zoo.mp4"),
         Some(123456789),
     )
     .unwrap();
 
     assert_eq!(entry.title(), "Me at the zoo");
-    assert_eq!(entry.destination_path(), "/downloads/zoo.mp4");
+    assert_eq!(entry.destination_path(), abs_path("downloads/zoo.mp4"));
     assert_eq!(entry.completed_at(), 123456789);
     assert_eq!(entry.download_id(), job_id);
 
@@ -870,6 +1282,127 @@ async fn test_download_history_entry_invariants_and_actions() {
         None,
     );
     assert!(matches!(empty_dest, Err(CoreError::ValidationError(_))));
+}
+
+// 19b. History path confinement: entries outside the download directory are refused
+#[tokio::test]
+async fn test_history_file_path_confinement() {
+    use polysaver_core::domain::{AppSettings, DownloadPreset, OutputFormat, VideoQuality};
+    use polysaver_core::ports::settings_repository::SettingsRepository;
+    use std::sync::Arc;
+
+    struct DummySettingsRepo;
+    #[async_trait::async_trait]
+    impl SettingsRepository for DummySettingsRepo {
+        async fn load(&self) -> Result<AppSettings, CoreError> {
+            AppSettings::defaults_for(abs_path("confinement_downloads"))
+        }
+        async fn save(&self, _: &AppSettings) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    let test_dir =
+        std::env::temp_dir().join(format!("polysaver_confinement_{}", uuid::Uuid::new_v4()));
+    let downloads_dir = test_dir.join("downloads");
+    tokio::fs::create_dir_all(&downloads_dir).await.unwrap();
+
+    let inside_file = downloads_dir.join("inside.mp4");
+    tokio::fs::write(&inside_file, b"media").await.unwrap();
+
+    let outside_dir = test_dir.join("elsewhere");
+    tokio::fs::create_dir_all(&outside_dir).await.unwrap();
+    let outside_file = outside_dir.join("outside.mp4");
+    tokio::fs::write(&outside_file, b"secret").await.unwrap();
+
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+    let service = StartDownloadService::new(
+        Arc::new(FakeDownloader),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        Arc::new(DummySettingsRepo),
+        history_repo.clone(),
+        None,
+        test_dir.join("temp"),
+    );
+
+    let url = MediaUrl::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
+    let preset = DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P720).unwrap();
+
+    // Entry recorded with the downloads directory: the file inside is accepted.
+    let inside_entry = DownloadHistoryEntry::new_with_dir(
+        DownloadId::new(),
+        url.clone(),
+        "Inside".to_string(),
+        preset,
+        inside_file.to_string_lossy().to_string(),
+        Some(1000),
+        downloads_dir.to_string_lossy().to_string(),
+    )
+    .unwrap();
+    history_repo.append(inside_entry.clone()).await.unwrap();
+    let resolved = service
+        .get_history_file_path(inside_entry.id())
+        .await
+        .unwrap();
+    assert!(resolved.ends_with("inside.mp4"));
+
+    // Trafiquée entry: path outside the recorded directory must be refused.
+    let outside_entry = DownloadHistoryEntry::new_with_dir(
+        DownloadId::new(),
+        url,
+        "Outside".to_string(),
+        preset,
+        outside_file.to_string_lossy().to_string(),
+        Some(2000),
+        downloads_dir.to_string_lossy().to_string(),
+    )
+    .unwrap();
+    history_repo.append(outside_entry.clone()).await.unwrap();
+    let err = service
+        .get_history_file_path(outside_entry.id())
+        .await
+        .unwrap_err();
+    assert_eq!(err.machine_code(), "OUTPUT_FILE_NOT_FOUND");
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+// 19c. History entry path validation: absolute, no traversal
+#[test]
+fn test_history_entry_rejects_relative_and_traversal_paths() {
+    let url = MediaUrl::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
+    let preset = DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P720).unwrap();
+
+    assert!(DownloadHistoryEntry::new(
+        DownloadId::new(),
+        url.clone(),
+        "T".to_string(),
+        preset,
+        "relative/video.mp4".to_string(),
+        None,
+    )
+    .is_err());
+
+    assert!(DownloadHistoryEntry::new(
+        DownloadId::new(),
+        url.clone(),
+        "T".to_string(),
+        preset,
+        abs_path("downloads/../../etc/passwd"),
+        None,
+    )
+    .is_err());
+
+    assert!(DownloadHistoryEntry::new(
+        DownloadId::new(),
+        url,
+        "T".to_string(),
+        preset,
+        abs_path("downloads/with\0null.mp4"),
+        None,
+    )
+    .is_err());
 }
 
 #[test]
@@ -954,6 +1487,7 @@ impl MediaDownloader for BlockingFakeDownloader {
             percent: Some(25),
             downloaded_bytes: Some(250),
             total_bytes: Some(1000),
+            total_bytes_estimate: None,
             speed_bytes_per_second: Some(100),
         });
 
@@ -970,6 +1504,8 @@ impl MediaDownloader for BlockingFakeDownloader {
             audio_path: None,
             title: "Test Video".to_string(),
             duration_seconds: Some(100),
+            engine_outdated: false,
+            cookies_diagnostic: None,
         })
     }
 }
@@ -1015,7 +1551,16 @@ async fn test_cancel_and_dismiss_download_state_validation() {
     assert_eq!(second_cancel.status(), DownloadStatus::Canceled);
 
     // 4. Verify sink received exactly 1 canceled event and 0 completed or failed
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let saw_cancellation = wait_until(
+        || async {
+            sink.canceled_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 1
+        },
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+    assert!(saw_cancellation, "the canceled event was never emitted");
     assert_eq!(
         sink.canceled_count
             .load(std::sync::atomic::Ordering::SeqCst),
@@ -1067,8 +1612,8 @@ async fn test_cannot_cancel_completed_job() {
 
     let job_id = job.id();
 
-    // Wait for background worker to complete
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for the background worker to complete.
+    wait_for_terminal(&service, job_id).await;
 
     // Cancellation of completed job is rejected
     let cancel_res = service.cancel_download(job_id).await;
@@ -1079,4 +1624,622 @@ async fn test_cannot_cancel_completed_job() {
     ));
 
     let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+// 20. Automatic retry: transient failures are retried, permanent ones are not
+struct CountingWarningSink {
+    warnings: std::sync::Mutex<Vec<String>>,
+}
+
+impl EventSink for CountingWarningSink {
+    fn emit_queued(&self, _job: &DownloadJob) {}
+    fn emit_progress(&self, _progress: &polysaver_core::ports::DownloadProgressEvent) {}
+    fn emit_completed(&self, _job: &DownloadJob) {}
+    fn emit_failed(&self, _job: &DownloadJob, _error: &DownloadErrorDetails) {}
+    fn emit_canceled(&self, _job: &DownloadJob) {}
+    fn emit_warning(&self, warning: &polysaver_core::ports::event_sink::DownloadWarningEvent) {
+        self.warnings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(warning.code.clone());
+    }
+}
+
+/// Fails a fixed number of times before succeeding, so retry behavior is observable.
+struct FlakyDownloader {
+    failures_remaining: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl MediaDownloader for FlakyDownloader {
+    async fn download_stream(
+        &self,
+        request: DownloadStreamRequest,
+        _cb: Arc<dyn Fn(StreamProgress) + Send + Sync>,
+    ) -> Result<DownloadedStreams, CoreError> {
+        let remaining = self
+            .failures_remaining
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if remaining > 0 {
+            self.failures_remaining
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let mut details = DownloadErrorDetails::from_code(
+                polysaver_core::error::DownloadErrorCode::NetworkUnavailable,
+            );
+            details.message = "transient network failure".to_string();
+            return Err(CoreError::DownloadFailed(details));
+        }
+
+        let file = request.temp_dir.join("video.mp4");
+        tokio::fs::write(&file, b"flaky success").await.unwrap();
+        Ok(DownloadedStreams {
+            raw_artifacts: vec![file.clone()],
+            video_path: Some(file),
+            audio_path: None,
+            title: "Flaky Video".to_string(),
+            duration_seconds: Some(10),
+            engine_outdated: false,
+            cookies_diagnostic: None,
+        })
+    }
+}
+
+/// Non-retryable error source: must fail on the first attempt.
+struct PermanentFailureDownloader;
+
+#[async_trait]
+impl MediaDownloader for PermanentFailureDownloader {
+    async fn download_stream(
+        &self,
+        _request: DownloadStreamRequest,
+        _cb: Arc<dyn Fn(StreamProgress) + Send + Sync>,
+    ) -> Result<DownloadedStreams, CoreError> {
+        let mut details = DownloadErrorDetails::from_code(
+            polysaver_core::error::DownloadErrorCode::VideoUnavailable,
+        );
+        details.message = "video unavailable".to_string();
+        Err(CoreError::DownloadFailed(details))
+    }
+}
+
+#[tokio::test]
+async fn test_transient_failures_are_retried_until_success() {
+    let test_dir =
+        std::env::temp_dir().join(format!("polysaver_retry_ok_{}", uuid::Uuid::new_v4()));
+    let settings = AppSettings::defaults_for(test_dir.join("downloads")).unwrap();
+    let repo = Arc::new(InMemorySettingsRepo {
+        settings: RwLock::new(settings),
+    });
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+    let sink = Arc::new(CountingWarningSink {
+        warnings: std::sync::Mutex::new(Vec::new()),
+    });
+
+    // Fail twice, then succeed on the third attempt.
+    let service = StartDownloadService::new_with_retry_policy(
+        Arc::new(FlakyDownloader {
+            failures_remaining: std::sync::atomic::AtomicUsize::new(2),
+        }),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        repo,
+        history_repo,
+        Some(sink.clone()),
+        test_dir.join("temp"),
+        RetryPolicy::immediate(),
+    );
+
+    let job = service
+        .start_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, None)
+        .await
+        .unwrap();
+
+    wait_for_terminal(&service, job.id()).await;
+
+    let finished = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == job.id())
+        .unwrap();
+    assert_eq!(finished.status(), DownloadStatus::Completed);
+    assert_eq!(
+        finished.retry_count(),
+        2,
+        "two automatic retries were performed"
+    );
+
+    let warnings = sink
+        .warnings
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    assert_eq!(warnings.iter().filter(|c| *c == "RETRY_ATTEMPT").count(), 2);
+
+    // Only the successful attempt writes history.
+    let history = service.list_history().await.unwrap();
+    assert_eq!(history.len(), 1);
+
+    // No job_<id> temporary workspace survives the retry cycle.
+    let temp_root = test_dir.join("temp");
+    if temp_root.exists() {
+        let mut entries = tokio::fs::read_dir(&temp_root).await.unwrap();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !name.starts_with("job_"),
+                "temporary directory '{name}' leaked after retries"
+            );
+        }
+    }
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+#[tokio::test]
+async fn test_non_retryable_failure_is_immediate() {
+    let test_dir = std::env::temp_dir().join(format!("polysaver_noretry_{}", uuid::Uuid::new_v4()));
+    let settings = AppSettings::defaults_for(test_dir.join("downloads")).unwrap();
+    let repo = Arc::new(InMemorySettingsRepo {
+        settings: RwLock::new(settings),
+    });
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+    let sink = Arc::new(CountingWarningSink {
+        warnings: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let service = StartDownloadService::new_with_retry_policy(
+        Arc::new(PermanentFailureDownloader),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        repo,
+        history_repo,
+        Some(sink.clone()),
+        test_dir.join("temp"),
+        RetryPolicy::immediate(),
+    );
+
+    let job = service
+        .start_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, None)
+        .await
+        .unwrap();
+
+    wait_for_terminal(&service, job.id()).await;
+
+    let finished = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == job.id())
+        .unwrap();
+    assert_eq!(finished.status(), DownloadStatus::Failed);
+    assert_eq!(
+        finished.retry_count(),
+        0,
+        "no retry for a permanent failure"
+    );
+    assert!(sink
+        .warnings
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .all(|c| c != "RETRY_ATTEMPT"));
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+#[tokio::test]
+async fn test_exhausted_retries_end_in_failed_with_original_error() {
+    let test_dir = std::env::temp_dir().join(format!("polysaver_exhaust_{}", uuid::Uuid::new_v4()));
+    let settings = AppSettings::defaults_for(test_dir.join("downloads")).unwrap();
+    let repo = Arc::new(InMemorySettingsRepo {
+        settings: RwLock::new(settings),
+    });
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+
+    let service = StartDownloadService::new_with_retry_policy(
+        Arc::new(FailingDownloader),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        repo,
+        history_repo,
+        None,
+        test_dir.join("temp"),
+        RetryPolicy::immediate(),
+    );
+
+    let job = service
+        .start_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, None)
+        .await
+        .unwrap();
+
+    wait_for_terminal(&service, job.id()).await;
+
+    let finished = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == job.id())
+        .unwrap();
+    assert_eq!(finished.status(), DownloadStatus::Failed);
+    assert_eq!(finished.retry_count(), 2, "1 initial attempt + 2 retries");
+    assert!(finished
+        .error_message()
+        .unwrap()
+        .contains("yt-dlp stream error"));
+    assert!(service.list_history().await.unwrap().is_empty());
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+// 21. YtdlpUpdateRequired triggers a single engine update followed by one retry
+struct StaleEngineDownloader {
+    stale_remaining: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl MediaDownloader for StaleEngineDownloader {
+    async fn download_stream(
+        &self,
+        request: DownloadStreamRequest,
+        _cb: Arc<dyn Fn(StreamProgress) + Send + Sync>,
+    ) -> Result<DownloadedStreams, CoreError> {
+        let remaining = self
+            .stale_remaining
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if remaining > 0 {
+            self.stale_remaining
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let mut details = DownloadErrorDetails::from_code(
+                polysaver_core::error::DownloadErrorCode::YtdlpUpdateRequired,
+            );
+            details.message = "engine too old".to_string();
+            return Err(CoreError::DownloadFailed(details));
+        }
+
+        let file = request.temp_dir.join("video.mp4");
+        tokio::fs::write(&file, b"updated engine success")
+            .await
+            .unwrap();
+        Ok(DownloadedStreams {
+            raw_artifacts: vec![file.clone()],
+            video_path: Some(file),
+            audio_path: None,
+            title: "After Update".to_string(),
+            duration_seconds: Some(5),
+            engine_outdated: false,
+            cookies_diagnostic: None,
+        })
+    }
+}
+
+struct CountingEngineUpdater {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl polysaver_core::services::EngineUpdater for CountingEngineUpdater {
+    async fn update_engine(&self) -> Result<String, CoreError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("2026.09.01".to_string())
+    }
+}
+
+#[tokio::test]
+async fn test_stale_engine_updates_once_then_retries() {
+    let test_dir = std::env::temp_dir().join(format!("polysaver_stale_{}", uuid::Uuid::new_v4()));
+    let settings = AppSettings::defaults_for(test_dir.join("downloads")).unwrap();
+    let repo = Arc::new(InMemorySettingsRepo {
+        settings: RwLock::new(settings),
+    });
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+    let sink = Arc::new(CountingWarningSink {
+        warnings: std::sync::Mutex::new(Vec::new()),
+    });
+    let updater = Arc::new(CountingEngineUpdater {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+
+    let service = StartDownloadService::new_with_retry_policy(
+        Arc::new(StaleEngineDownloader {
+            stale_remaining: std::sync::atomic::AtomicUsize::new(1),
+        }),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        repo,
+        history_repo,
+        Some(sink.clone()),
+        test_dir.join("temp"),
+        RetryPolicy::immediate(),
+    )
+    .with_engine_updater(updater.clone());
+
+    let job = service
+        .start_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, None)
+        .await
+        .unwrap();
+
+    wait_for_terminal(&service, job.id()).await;
+
+    let finished = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == job.id())
+        .unwrap();
+    assert_eq!(finished.status(), DownloadStatus::Completed);
+    assert_eq!(
+        updater.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the engine must be updated exactly once"
+    );
+    assert_eq!(finished.retry_count(), 1);
+
+    let warnings = sink
+        .warnings
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    assert!(warnings.iter().any(|c| c == "ENGINE_UPDATE_RETRY"));
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+#[tokio::test]
+async fn test_failed_engine_update_keeps_original_error() {
+    let test_dir =
+        std::env::temp_dir().join(format!("polysaver_stale_fail_{}", uuid::Uuid::new_v4()));
+    let settings = AppSettings::defaults_for(test_dir.join("downloads")).unwrap();
+    let repo = Arc::new(InMemorySettingsRepo {
+        settings: RwLock::new(settings),
+    });
+    let history_repo = Arc::new(InMemoryTestHistoryRepo::default());
+
+    struct OfflineUpdater;
+    #[async_trait::async_trait]
+    impl polysaver_core::services::EngineUpdater for OfflineUpdater {
+        async fn update_engine(&self) -> Result<String, CoreError> {
+            Err(CoreError::ProviderError("offline".to_string()))
+        }
+    }
+
+    let service = StartDownloadService::new_with_retry_policy(
+        Arc::new(StaleEngineDownloader {
+            stale_remaining: std::sync::atomic::AtomicUsize::new(5),
+        }),
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        repo,
+        history_repo,
+        None,
+        test_dir.join("temp"),
+        RetryPolicy::immediate(),
+    )
+    .with_engine_updater(Arc::new(OfflineUpdater));
+
+    let job = service
+        .start_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, None)
+        .await
+        .unwrap();
+
+    wait_for_terminal(&service, job.id()).await;
+
+    let finished = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == job.id())
+        .unwrap();
+    assert_eq!(finished.status(), DownloadStatus::Failed);
+    // The original engine error is reported, not the update failure.
+    assert_eq!(
+        finished.error_details().map(|d| d.code),
+        Some(polysaver_core::error::DownloadErrorCode::YtdlpUpdateRequired)
+    );
+
+    let _ = tokio::fs::remove_dir_all(&test_dir).await;
+}
+
+// 22. Orphaned temp workspaces from a crash are purged, recent ones are kept
+#[tokio::test]
+async fn test_purge_orphan_temp_dirs_only_removes_old_entries() {
+    use polysaver_core::services::start_download::purge_orphan_temp_dirs_older_than;
+
+    let temp_root = std::env::temp_dir().join(format!("polysaver_purge_{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&temp_root).await.unwrap();
+
+    // An old leftover from a killed run (contains a partial download).
+    let old_job = temp_root.join("job_11111111-1111-1111-1111-111111111111");
+    tokio::fs::create_dir_all(&old_job).await.unwrap();
+    tokio::fs::write(old_job.join("stream.part"), b"partial data")
+        .await
+        .unwrap();
+
+    // A recent workspace, possibly belonging to a concurrent instance.
+    let recent_job = temp_root.join("job_22222222-2222-2222-2222-222222222222");
+    tokio::fs::create_dir_all(&recent_job).await.unwrap();
+
+    // Unrelated directory names must never be touched.
+    let unrelated = temp_root.join("not_a_job_dir");
+    tokio::fs::create_dir_all(&unrelated).await.unwrap();
+
+    // A stray file named like a job directory is not a directory and stays.
+    let stray_file = temp_root.join("job_33333333-3333-3333-3333-333333333333");
+    tokio::fs::write(&stray_file, b"file, not dir")
+        .await
+        .unwrap();
+
+    // Zero threshold: every `job_*` directory qualifies as old, isolating the
+    // name/type logic from the age comparison.
+    let removed = purge_orphan_temp_dirs_older_than(&temp_root, std::time::Duration::ZERO).await;
+    assert_eq!(removed, 2, "only the two job_* directories are candidates");
+    assert!(!old_job.exists());
+    assert!(!recent_job.exists());
+    assert!(
+        stray_file.exists(),
+        "a file is never removed as a directory"
+    );
+    assert!(unrelated.exists(), "non job_* entries are left alone");
+
+    // With the real 24 h threshold, fresh directories survive.
+    let fresh = temp_root.join("job_44444444-4444-4444-4444-444444444444");
+    tokio::fs::create_dir_all(&fresh).await.unwrap();
+    let removed =
+        polysaver_core::services::start_download::purge_orphan_temp_dirs(&temp_root).await;
+    assert_eq!(removed, 0, "a just-created workspace must survive startup");
+    assert!(fresh.exists());
+
+    // A missing temp root is not an error.
+    let missing = temp_root.join("does_not_exist");
+    let removed = purge_orphan_temp_dirs_older_than(&missing, std::time::Duration::ZERO).await;
+    assert_eq!(removed, 0);
+
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+}
+
+// 34. Playlist download batches
+/// Downloader that never finishes, so batch tests observe queue state without racing
+/// against the fake pipeline's fast completion.
+struct HangingDownloader;
+
+#[async_trait]
+impl MediaDownloader for HangingDownloader {
+    async fn download_stream(
+        &self,
+        _request: DownloadStreamRequest,
+        _cb: Arc<dyn Fn(StreamProgress) + Send + Sync>,
+    ) -> Result<DownloadedStreams, CoreError> {
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        Err(CoreError::OperationCancelled)
+    }
+}
+
+async fn batch_test_service(
+    downloader: Arc<dyn MediaDownloader>,
+) -> (StartDownloadService, Arc<InMemoryTestHistoryRepo>, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("polysaver_batch_{}", uuid::Uuid::new_v4()));
+    let download_dir = dir.join("downloads");
+    tokio::fs::create_dir_all(&download_dir).await.unwrap();
+    let settings = AppSettings::new(
+        download_dir.to_string_lossy().to_string(),
+        ThemeMode::Dark,
+        DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P1080).unwrap(),
+        Language::French,
+    )
+    .unwrap();
+    let history = Arc::new(InMemoryTestHistoryRepo::default());
+    let service = StartDownloadService::new(
+        downloader,
+        Arc::new(FakeConverter),
+        Arc::new(FakeInspector),
+        Arc::new(InMemorySettingsRepo {
+            settings: RwLock::new(settings),
+        }),
+        history.clone(),
+        None,
+        dir.join("temp"),
+    );
+    (service, history, dir)
+}
+
+fn playlist_entry_urls(count: usize) -> Vec<MediaUrl> {
+    (0..count)
+        .map(|i| {
+            MediaUrl::parse(&format!("https://www.youtube.com/watch?v=entry{i}"))
+                .expect("generated URL must be valid")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_start_download_batch_rejects_empty_and_oversized_selections() {
+    let (service, _history, _dir) = batch_test_service(Arc::new(HangingDownloader)).await;
+
+    let empty = service
+        .start_download_batch(Vec::new(), None, None)
+        .await
+        .expect_err("an empty selection must be refused");
+    assert!(matches!(empty, CoreError::InvalidSettings(_)));
+
+    let too_many = playlist_entry_urls(MAX_PLAYLIST_DOWNLOADS + 1);
+    let refused = service
+        .start_download_batch(too_many, None, None)
+        .await
+        .expect_err("more than the cap must be refused");
+    assert!(matches!(refused, CoreError::InvalidSettings(_)));
+
+    // Nothing was queued by the two rejected calls.
+    assert!(service.list_downloads().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_start_download_batch_queues_one_independent_job_per_url() {
+    let (service, history, _dir) = batch_test_service(Arc::new(HangingDownloader)).await;
+    let urls = playlist_entry_urls(3);
+    let expected: Vec<String> = urls.iter().map(|u| u.as_str().to_string()).collect();
+
+    let jobs = service
+        .start_download_batch(urls, None, None)
+        .await
+        .expect("batch must be accepted");
+    assert_eq!(jobs.len(), 3);
+
+    // Distinct identifiers: each video is its own job with its own progress,
+    // cancellation, retry and history entry.
+    let mut ids: Vec<String> = jobs.iter().map(|j| j.id().to_string()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "each entry must get its own job id");
+
+    let listed = service.list_downloads().await;
+    assert_eq!(listed.len(), 3);
+    let mut listed_urls: Vec<String> = listed
+        .iter()
+        .map(|j| j.url().as_str().to_string())
+        .collect();
+    listed_urls.sort();
+    let mut sorted_expected = expected.clone();
+    sorted_expected.sort();
+    assert_eq!(listed_urls, sorted_expected);
+
+    // The default preset from settings is applied to every job of the batch.
+    for job in &listed {
+        assert_eq!(
+            job.preset(),
+            DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P1080).unwrap()
+        );
+    }
+
+    // No video finished yet: history stays untouched.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(history.load().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_single_download_refuses_playlist_urls() {
+    let (service, _history, _dir) = batch_test_service(Arc::new(FakeDownloader)).await;
+
+    let refused = service
+        .start_download("https://www.youtube.com/playlist?list=PL123", None, None)
+        .await
+        .expect_err("playlist URLs must not go through the single-video pipeline");
+    assert!(matches!(refused, CoreError::InvalidState(_)));
+
+    let channel = service
+        .start_download("https://www.youtube.com/@handle/videos", None, None)
+        .await;
+    assert!(matches!(channel, Err(CoreError::InvalidState(_))));
+
+    assert!(service.list_downloads().await.is_empty());
+
+    // A share URL (v= plus list=) stays a normal single video.
+    let job = service
+        .start_download(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123",
+            None,
+            None,
+        )
+        .await
+        .expect("share URLs must still download as a single video");
+    assert!(!job.url().as_str().contains("list="));
 }

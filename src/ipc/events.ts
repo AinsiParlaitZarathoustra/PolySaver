@@ -2,7 +2,7 @@
 // Copyright (C) 2026 PolySaver contributors
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { DownloadJobDto, DownloadProgressEvent } from './contracts';
+import type { DownloadJobDto, DownloadProgressEvent, DownloadWarningEvent } from './contracts';
 
 /**
  * Subscribes to download progress events.
@@ -56,6 +56,17 @@ export async function onDownloadCanceled(
   handler: (payload: DownloadJobDto) => void,
 ): Promise<UnlistenFn> {
   return await listen<DownloadJobDto>('download://canceled', (event) => {
+    handler(event.payload);
+  });
+}
+
+/**
+ * Subscribes to non-fatal download warnings (e.g. outdated engine).
+ */
+export async function onDownloadWarning(
+  handler: (payload: DownloadWarningEvent) => void,
+): Promise<UnlistenFn> {
+  return await listen<DownloadWarningEvent>('download://warning', (event) => {
     handler(event.payload);
   });
 }

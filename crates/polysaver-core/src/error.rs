@@ -163,9 +163,6 @@ pub enum CoreError {
     /// Invalid URL syntax or forbidden scheme.
     InvalidUrl(String),
 
-    /// Playlist URLs are not supported in this version.
-    PlaylistNotSupported(String),
-
     /// Job ID not found.
     JobNotFound(DownloadId),
 
@@ -216,7 +213,6 @@ impl CoreError {
     pub fn machine_code(&self) -> &'static str {
         match self {
             Self::InvalidUrl(_) => "INVALID_URL",
-            Self::PlaylistNotSupported(_) => "PLAYLIST_NOT_SUPPORTED",
             Self::JobNotFound(_) => "JOB_NOT_FOUND",
             Self::IllegalTransition { .. } => "ILLEGAL_TRANSITION",
             Self::InvalidProgress { .. } => "INVALID_PROGRESS",
@@ -240,11 +236,6 @@ impl CoreError {
             Self::InvalidUrl(msg) => {
                 DownloadErrorDetails::new(DownloadErrorCode::VideoUnavailable, msg, false)
             }
-            Self::PlaylistNotSupported(_) => DownloadErrorDetails::new(
-                DownloadErrorCode::VideoUnavailable,
-                "Les playlists ne sont pas prises en charge.",
-                false,
-            ),
             Self::Canceled(_) | Self::OperationCancelled => {
                 DownloadErrorDetails::from_code(DownloadErrorCode::DownloadCanceled)
             }
@@ -269,7 +260,6 @@ impl fmt::Display for CoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidUrl(msg) => write!(f, "Invalid URL: {msg}"),
-            Self::PlaylistNotSupported(msg) => write!(f, "Playlist not supported: {msg}"),
             Self::JobNotFound(id) => write!(f, "Job not found: {id}"),
             Self::IllegalTransition {
                 current,

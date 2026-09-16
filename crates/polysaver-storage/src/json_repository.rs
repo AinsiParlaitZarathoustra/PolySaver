@@ -2,12 +2,32 @@
 // Copyright (C) 2026 PolySaver contributors
 
 use async_trait::async_trait;
-use polysaver_core::domain::{AppSettings, AppSettingsDto};
+use polysaver_core::domain::{AppSettings, AppSettingsDto, SETTINGS_SCHEMA_VERSION};
 use polysaver_core::error::CoreError;
 use polysaver_core::ports::SettingsRepository;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
+
+/// Applies forward migrations to a freshly deserialized settings document.
+///
+/// `from_version` is the `schemaVersion` stored in the file; `0` means the file
+/// predates schema versioning. `default_download_dir` is substituted for the
+/// legacy literal `~/Downloads/PolySaver`, which the domain forbids.
+///
+/// Future migrations are added here as `match from_version { 1 => ..., _ => ... }`.
+fn migrate(
+    mut dto: AppSettingsDto,
+    from_version: u32,
+    default_download_dir: &str,
+) -> AppSettingsDto {
+    if from_version < 1 && dto.download_directory == "~/Downloads/PolySaver" {
+        dto.download_directory = default_download_dir.to_string();
+    }
+    dto.schema_version = SETTINGS_SCHEMA_VERSION;
+    dto
+}
 
 /// Persistent JSON file settings repository.
 /// Performs atomic writes and validates untrusted JSON via `TryFrom<AppSettingsDto>`.
@@ -80,12 +100,12 @@ impl SettingsRepository for JsonSettingsRepository {
             ))
         })?;
 
-        // One-time migration of legacy literal "~/Downloads/PolySaver"
-        let mut migrated = false;
-        if dto.download_directory == "~/Downloads/PolySaver" {
-            dto.download_directory = self.default_settings.download_directory().to_string();
-            migrated = true;
-        }
+        // Apply schema migrations; a legacy literal download directory is replaced.
+        let default_dir = self.default_settings.download_directory().to_string();
+        let from_version = dto.schema_version;
+        let migrated = from_version < SETTINGS_SCHEMA_VERSION
+            || dto.download_directory == "~/Downloads/PolySaver";
+        dto = migrate(dto, from_version, &default_dir);
 
         let settings = AppSettings::try_from(dto)?;
 
@@ -120,21 +140,39 @@ impl SettingsRepository for JsonSettingsRepository {
             CoreError::StorageError(format!("Failed to serialize settings: {err}"))
         })?;
 
-        // Atomic write: write to temporary file then rename
+        // Atomic write: write to a temporary file, flush it to disk, then rename.
         let tmp_file = parent_dir.join(format!(".settings_{}.tmp", uuid::Uuid::new_v4().simple()));
 
-        tokio::fs::write(&tmp_file, serialized.as_bytes())
-            .await
-            .map_err(|err| {
-                CoreError::StorageError(format!(
-                    "Failed to write temporary settings file '{}': {err}",
-                    tmp_file.display()
-                ))
-            })?;
+        let mut handle = tokio::fs::File::create(&tmp_file).await.map_err(|err| {
+            CoreError::StorageError(format!(
+                "Failed to create temporary settings file '{}': {err}",
+                tmp_file.display()
+            ))
+        })?;
+
+        if let Err(err) = handle.write_all(serialized.as_bytes()).await {
+            let _ = tokio::fs::remove_file(&tmp_file).await;
+            return Err(CoreError::StorageError(format!(
+                "Failed to write temporary settings file '{}': {err}",
+                tmp_file.display()
+            )));
+        }
+
+        // fsync before rename: without it a crash can leave an empty/partial file renamed in place.
+        if let Err(err) = handle.sync_all().await {
+            let _ = tokio::fs::remove_file(&tmp_file).await;
+            return Err(CoreError::StorageError(format!(
+                "Failed to flush temporary settings file '{}': {err}",
+                tmp_file.display()
+            )));
+        }
+        drop(handle);
 
         tokio::fs::rename(&tmp_file, &self.config_file)
             .await
             .map_err(|err| {
+                // Do not leak the temporary file when the rename fails.
+                let _ = std::fs::remove_file(&tmp_file);
                 CoreError::StorageError(format!(
                     "Failed to atomically persist settings file '{}': {err}",
                     self.config_file.display()

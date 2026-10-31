@@ -23,6 +23,7 @@ Téléchargeur vidéo et audio sans publicité ni abonnement et **rapide 🚀**
 
 La v2.6.0 se concentre sur Windows et sur la fraîcheur de l'application.
 
+- **Bug majeur corrigé sous Windows** : les fenêtres noires qui s'ouvraient pendant les téléchargements n'apparaissent plus
 - **Titres avec accents** : les vidéos dont le titre contient des accents (é, à, ç…) se téléchargent maintenant sans problème sous Windows
 - **Icône plus nette** : l'icône de PolySaver s'affiche en grand dans la barre des tâches, le menu Démarrer et sur le bureau
 - **Moteur à jour** : PolySaver embarque la dernière version de yt-dlp (26 octobre 2026) et ne revient jamais à une version plus ancienne

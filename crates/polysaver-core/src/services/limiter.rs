@@ -73,10 +73,10 @@ impl ConcurrencyLimiter {
         cancel_token: Option<&CancellationToken>,
     ) -> Result<ConcurrencyPermit, CoreError> {
         loop {
-            if let Some(token) = cancel_token {
-                if token.is_cancelled() {
-                    return Err(CoreError::OperationCancelled);
-                }
+            if let Some(token) = cancel_token
+                && token.is_cancelled()
+            {
+                return Err(CoreError::OperationCancelled);
             }
 
             let notified = self.notify.notified();

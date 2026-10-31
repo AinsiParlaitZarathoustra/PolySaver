@@ -7,7 +7,9 @@
 //! Strictly isolated infrastructure crate without dependencies on Tauri or Core domain.
 
 pub mod error;
+pub mod process;
 pub mod resolver;
 
 pub use error::{BinResError, BinaryKind};
-pub use resolver::{query_binary_version, BinaryResolver, ResolvedBinary};
+pub use process::{background_command, read_line_lossy};
+pub use resolver::{BinaryResolver, ResolvedBinary, query_binary_version};

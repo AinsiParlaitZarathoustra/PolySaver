@@ -127,11 +127,11 @@ impl MultiStreamProgressAggregator {
                 current.downloaded = dl.max(current.downloaded);
             }
             // An exact total always wins over a previously stored estimate.
-            if let Some(t) = parsed.total_bytes.filter(|t| *t > 0) {
-                if current.total.is_none() || current.is_estimate {
-                    current.total = Some(t);
-                    current.is_estimate = false;
-                }
+            if let Some(t) = parsed.total_bytes.filter(|t| *t > 0)
+                && (current.total.is_none() || current.is_estimate)
+            {
+                current.total = Some(t);
+                current.is_estimate = false;
             }
             if current.total.is_none() {
                 // Fall back to the estimate only when no exact total exists.

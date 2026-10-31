@@ -3,10 +3,10 @@
 
 //! Media inspection and validation using the bundled FFprobe sidecar.
 
+use polysaver_binres::background_command;
 use polysaver_core::error::{CoreError, DownloadErrorCode, DownloadErrorDetails};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::process::Command;
 
 /// Summary metadata extracted by FFprobe.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -26,7 +26,7 @@ impl FfprobeInspector {
         ffprobe_bin: &Path,
         media_path: &Path,
     ) -> Result<MediaInspection, CoreError> {
-        let output = Command::new(ffprobe_bin)
+        let output = background_command(ffprobe_bin)
             .args([
                 "-v",
                 "error",
@@ -134,15 +134,15 @@ impl FfprobeInspector {
             return Err(CoreError::DownloadFailed(details));
         }
 
-        if let Some(ref codec) = inspection.audio_codec {
-            if codec != "mp3" {
-                let mut details = DownloadErrorDetails::from_code(DownloadErrorCode::FfmpegFailed);
-                details.message = format!(
-                    "Generated file '{}' codec is '{codec}', expected 'mp3'",
-                    media_path.display()
-                );
-                return Err(CoreError::DownloadFailed(details));
-            }
+        if let Some(ref codec) = inspection.audio_codec
+            && codec != "mp3"
+        {
+            let mut details = DownloadErrorDetails::from_code(DownloadErrorCode::FfmpegFailed);
+            details.message = format!(
+                "Generated file '{}' codec is '{codec}', expected 'mp3'",
+                media_path.display()
+            );
+            return Err(CoreError::DownloadFailed(details));
         }
 
         Ok(())
@@ -164,15 +164,15 @@ impl FfprobeInspector {
             return Err(CoreError::DownloadFailed(details));
         }
 
-        if let Some(ref codec) = inspection.audio_codec {
-            if codec != "flac" {
-                let mut details = DownloadErrorDetails::from_code(DownloadErrorCode::FfmpegFailed);
-                details.message = format!(
-                    "Generated file '{}' codec is '{codec}', expected 'flac'",
-                    media_path.display()
-                );
-                return Err(CoreError::DownloadFailed(details));
-            }
+        if let Some(ref codec) = inspection.audio_codec
+            && codec != "flac"
+        {
+            let mut details = DownloadErrorDetails::from_code(DownloadErrorCode::FfmpegFailed);
+            details.message = format!(
+                "Generated file '{}' codec is '{codec}', expected 'flac'",
+                media_path.display()
+            );
+            return Err(CoreError::DownloadFailed(details));
         }
 
         Ok(())

@@ -1,4 +1,4 @@
-# PolySaver 2.5 — Release & CI notes
+# PolySaver 2.6 — Release & CI notes
 
 Operational notes for the release pipeline. Written on 2026-09-13.
 
@@ -107,7 +107,7 @@ to run the release from `PolySaver` rather than to copy runs across.
    `src-tauri/tauri.conf.json` all carry the same version — the `validate` job fails
    otherwise.
 2. Run the `Release` workflow **in `AinsiParlaitZarathoustra/PolySaver`** with
-   `version: 2.5.0`, or push a `v2.5.0` tag there. Triggering it in the development
+   `version: 2.6.0`, or push a `v2.6.0` tag there. Triggering it in the development
    repository stops immediately by design (no signing secret, plus an explicit guard).
 3. The three platform jobs build and stage the assets; `publish` assembles them,
    regenerates `latest.json` + `SHA256SUMS.txt`, verifies the checksums of what

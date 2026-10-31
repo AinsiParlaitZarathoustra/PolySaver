@@ -178,17 +178,17 @@ async fn probe_kind(resolver: &BinaryResolver, kind: JsRuntimeKind) -> Option<Js
 /// not mask a working Node installation).
 pub async fn detect_js_runtime(resolver: &BinaryResolver) -> JsRuntimeStatus {
     let deno = probe_kind(resolver, JsRuntimeKind::Deno).await;
-    if let Some(status) = deno.as_ref() {
-        if status.is_usable {
-            return status.clone();
-        }
+    if let Some(status) = deno.as_ref()
+        && status.is_usable
+    {
+        return status.clone();
     }
 
     let node = probe_kind(resolver, JsRuntimeKind::Node).await;
-    if let Some(status) = node.as_ref() {
-        if status.is_usable {
-            return status.clone();
-        }
+    if let Some(status) = node.as_ref()
+        && status.is_usable
+    {
+        return status.clone();
     }
 
     // Nothing usable: report the stale Deno/Node so the UI can explain why.
@@ -212,7 +212,7 @@ pub async fn verify_installed_runtime(
     path: &Path,
     kind: JsRuntimeKind,
 ) -> Result<String, CoreError> {
-    let output = tokio::process::Command::new(path)
+    let output = polysaver_binres::background_command(path)
         .arg("--version")
         .output()
         .await

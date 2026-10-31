@@ -140,21 +140,20 @@ impl ProbeResult {
     pub fn compute_available_video_qualities(formats: &[FormatOption]) -> Vec<VideoQuality> {
         let mut heights = BTreeSet::new();
         for f in formats {
-            if f.has_video {
-                if let Some(h) = f.height {
-                    if h > 0 {
-                        heights.insert(h);
-                    }
-                }
+            if f.has_video
+                && let Some(h) = f.height
+                && h > 0
+            {
+                heights.insert(h);
             }
         }
 
         let mut qualities = Vec::new();
         for h in heights.into_iter().rev() {
-            if let Some(q) = VideoQuality::from_height(h) {
-                if !qualities.contains(&q) {
-                    qualities.push(q);
-                }
+            if let Some(q) = VideoQuality::from_height(h)
+                && !qualities.contains(&q)
+            {
+                qualities.push(q);
             }
         }
         qualities

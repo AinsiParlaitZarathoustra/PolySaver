@@ -4,12 +4,12 @@
 use crate::app_state::AppState;
 use crate::dto::{EngineUpdateResultDto, EngineUpdateStatusDto, IpcError, JsRuntimeStatusDto};
 use polysaver_binres::{BinaryKind, BinaryResolver};
-use polysaver_core::domain::engine_version::compare_versions;
 use polysaver_core::domain::EngineChannel;
+use polysaver_core::domain::engine_version::compare_versions;
 use polysaver_core::error::CoreError;
 use polysaver_core::ports::SettingsRepository;
 use polysaver_core::services::EngineUpdater;
-use polysaver_ytdlp::js_runtime::{detect_js_runtime, JsRuntimeStatus};
+use polysaver_ytdlp::js_runtime::{JsRuntimeStatus, detect_js_runtime};
 use polysaver_ytdlp::node_installer::install_node;
 use polysaver_ytdlp::updater::{YtDlpChannel, YtDlpUpdater};
 use std::path::{Path, PathBuf};
@@ -57,6 +57,17 @@ impl EngineUpdater for TauriEngineUpdater {
             Some(self.cache_file.clone()),
             to_updater_channel(channel),
         )?;
+
+        // Same guard as the `update_engine` command: never "update" to a release
+        // that is not newer, e.g. a tag cached by a previous app version that is
+        // older than the engine this version bundles.
+        if let Ok(current) = self.resolver.resolve_ytdlp().await
+            && let Ok(status) = updater.check_update(Some(&current.version)).await
+            && engine_is_current(&current.version, status.latest_version.as_deref())
+        {
+            return Ok(current.version);
+        }
+
         let outcome = updater.update().await?;
         self.resolver.invalidate(BinaryKind::YtDlp).await;
         Ok(outcome.installed_version)
@@ -154,7 +165,10 @@ fn active_job_count(jobs: &[polysaver_core::domain::DownloadJob]) -> usize {
         .count()
 }
 
-/// Returns true when the installed engine already matches the remote release.
+/// Returns true when the installed engine is at least as recent as the remote release.
+///
+/// An older remote tag (e.g. cached by a previous app version that bundled an
+/// older engine) must never trigger a downgrade.
 ///
 /// The comparison is strictly by version, never by age. A local build older than
 /// 90 days is only an advisory warning shown in the UI (`outdated`); it must not
@@ -163,7 +177,7 @@ fn engine_is_current(current: &str, latest: Option<&str>) -> bool {
     match latest {
         Some(latest) => matches!(
             compare_versions(current, latest),
-            Some(std::cmp::Ordering::Equal)
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
         ),
         // Unknown remote version: cannot claim we are up to date.
         None => false,
@@ -192,14 +206,14 @@ pub async fn update_engine(state: State<'_, AppState>) -> Result<EngineUpdateRes
     // Skip the ~40 MB download when the remote release is the one we already run.
     // Note: `status.outdated` is deliberately ignored here — it reflects the
     // advisory 90-day age warning, not the need for a download.
-    if let Ok(status) = updater.check_update(Some(&current_version)).await {
-        if engine_is_current(&current_version, status.latest_version.as_deref()) {
-            return Ok(EngineUpdateResultDto {
-                installed_version: current_version,
-                updated: false,
-                latest_version: status.latest_version,
-            });
-        }
+    if let Ok(status) = updater.check_update(Some(&current_version)).await
+        && engine_is_current(&current_version, status.latest_version.as_deref())
+    {
+        return Ok(EngineUpdateResultDto {
+            installed_version: current_version,
+            updated: false,
+            latest_version: status.latest_version,
+        });
     }
 
     let outcome = updater.update().await.map_err(IpcError::from)?;
@@ -387,6 +401,8 @@ mod tests {
             "2026.08.30.232658",
             Some("2026.08.30.232658")
         ));
+        // A newer local engine (bundled by an app upgrade) is never downgraded.
+        assert!(engine_is_current("2026.10.26", Some("2026.08.19")));
         // Unknown remote version means we cannot claim to be up to date.
         assert!(!engine_is_current("2026.08.19", None));
         // Unparseable versions are never treated as equal.

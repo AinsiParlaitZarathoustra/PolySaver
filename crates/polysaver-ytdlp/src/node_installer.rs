@@ -16,7 +16,7 @@
 //! and a download performed by our Rust client carries no quarantine attribute,
 //! so no re-signing or `xattr` step is required.
 
-use crate::js_runtime::{pinned_node_version, verify_installed_runtime, JsRuntimeKind};
+use crate::js_runtime::{JsRuntimeKind, pinned_node_version, verify_installed_runtime};
 use crate::updater::{download_verified_to_file, hex_encode, parse_sha256sums, replace_binary};
 use flate2::read::GzDecoder;
 use polysaver_core::error::CoreError;
@@ -61,7 +61,9 @@ pub async fn install_node(app_bin_dir: &Path) -> Result<NodeInstallOutcome, Core
         .await
         .map_err(|err| CoreError::StorageError(format!("Failed to create node dir: {err}")))?;
 
-    let archive_path = node_dir.join(format!("{asset}.download"));
+    // The real extension must stay last: `extract_node_binary` picks the zip or
+    // tar.gz decoder from it (a `.download` suffix broke every Windows install).
+    let archive_path = node_dir.join(staging_archive_name(asset));
     let asset_url = format!("{base}/{asset}");
     download_verified_to_file(&client, &asset_url, expected_hash, &archive_path).await?;
 
@@ -223,6 +225,11 @@ fn is_runtime_entry(path: &Path, is_regular_file: bool, binary_name: &str) -> bo
     }
 }
 
+/// Staging file name of a release archive while it is being downloaded.
+fn staging_archive_name(asset: &str) -> String {
+    format!("partial-{asset}")
+}
+
 /// Extracts the `node` executable from a `.tar.gz` or `.zip` archive.
 ///
 /// The archive layout is always `node-vX.Y.Z-<platform>/bin/node` (Unix) or
@@ -364,14 +371,14 @@ mod tests {
 
     #[test]
     fn test_extract_node_binary_from_tar_gz() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let dir = std::env::temp_dir().join(format!("polysaver_tar_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         // Build a minimal archive mimicking the official layout.
-        let archive_path = dir.join("fake.tar.gz");
+        let archive_path = dir.join(staging_archive_name("node-v24.21.0-linux-x64.tar.gz"));
         {
             let file = std::fs::File::create(&archive_path).unwrap();
             let encoder = GzEncoder::new(file, Compression::default());
@@ -417,7 +424,8 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("polysaver_zip_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let archive_path = dir.join("fake.zip");
+        // Named exactly like a real Windows download, staging prefix included.
+        let archive_path = dir.join(staging_archive_name("node-v24.21.0-win-x64.zip"));
 
         // Platform-appropriate entry layout (see fixture_entry_path).
         let entry_name = fixture_entry_path();
@@ -453,7 +461,9 @@ mod tests {
             "node"
         ));
         assert!(!is_runtime_entry(
-            Path::new("node-v24.21.0-darwin-arm64/lib/node_modules/npm/node_modules/lru-cache/dist/commonjs/node"),
+            Path::new(
+                "node-v24.21.0-darwin-arm64/lib/node_modules/npm/node_modules/lru-cache/dist/commonjs/node"
+            ),
             false,
             "node"
         ));
@@ -519,8 +529,8 @@ mod tests {
 
     #[test]
     fn test_extract_from_tar_prefers_bin_entry() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let dir = std::env::temp_dir().join(format!("polysaver_tarorder_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

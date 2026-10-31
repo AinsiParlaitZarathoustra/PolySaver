@@ -53,11 +53,7 @@ pub fn compare_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
     let parse = |v: &str| -> Option<Vec<u64>> {
         let parts: Option<Vec<u64>> = v.trim().split('.').map(|p| p.parse::<u64>().ok()).collect();
         let parts = parts?;
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts)
-        }
+        if parts.is_empty() { None } else { Some(parts) }
     };
 
     let a = parse(left)?;

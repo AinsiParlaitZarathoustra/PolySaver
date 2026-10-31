@@ -6,8 +6,8 @@ use polysaver_core::domain::download_job::DownloadId;
 use polysaver_core::domain::history::{DownloadHistoryEntry, HistoryEntryId};
 use polysaver_core::domain::{
     AppSettings, AppSettingsDto, DownloadJob, DownloadPreset, DownloadPresetDto, DownloadStatus,
-    Language, MediaUrl, MediaUrlKind, Mp3Quality, OutputFormat, ThemeMode, VideoQuality,
-    MAX_PLAYLIST_DOWNLOADS,
+    Language, MAX_PLAYLIST_DOWNLOADS, MediaUrl, MediaUrlKind, Mp3Quality, OutputFormat, ThemeMode,
+    VideoQuality,
 };
 use polysaver_core::error::{CoreError, DownloadErrorDetails};
 use polysaver_core::ports::event_sink::EventSink;
@@ -403,34 +403,42 @@ fn test_app_settings_path_policies() {
     assert_eq!(audio_settings.language(), Language::English);
 
     // Path validation: ~ prefix, relative path, empty path, null bytes rejected
-    assert!(AppSettings::new(
-        "~/Downloads".to_string(),
-        ThemeMode::Dark,
-        DownloadPreset::default(),
-        Language::French,
-    )
-    .is_err());
-    assert!(AppSettings::new(
-        "relative/path".to_string(),
-        ThemeMode::Dark,
-        DownloadPreset::default(),
-        Language::French,
-    )
-    .is_err());
-    assert!(AppSettings::new(
-        abs_path("path/with\0null"),
-        ThemeMode::Dark,
-        DownloadPreset::default(),
-        Language::French,
-    )
-    .is_err());
-    assert!(AppSettings::new(
-        "   ".to_string(),
-        ThemeMode::Dark,
-        DownloadPreset::default(),
-        Language::French,
-    )
-    .is_err());
+    assert!(
+        AppSettings::new(
+            "~/Downloads".to_string(),
+            ThemeMode::Dark,
+            DownloadPreset::default(),
+            Language::French,
+        )
+        .is_err()
+    );
+    assert!(
+        AppSettings::new(
+            "relative/path".to_string(),
+            ThemeMode::Dark,
+            DownloadPreset::default(),
+            Language::French,
+        )
+        .is_err()
+    );
+    assert!(
+        AppSettings::new(
+            abs_path("path/with\0null"),
+            ThemeMode::Dark,
+            DownloadPreset::default(),
+            Language::French,
+        )
+        .is_err()
+    );
+    assert!(
+        AppSettings::new(
+            "   ".to_string(),
+            ThemeMode::Dark,
+            DownloadPreset::default(),
+            Language::French,
+        )
+        .is_err()
+    );
 }
 
 // 12b. Cookie source and engine channel: closed enums, safe defaults, persistence
@@ -767,10 +775,12 @@ async fn test_failing_downloader_transitions_to_failed() {
     let downloads = service.list_downloads().await;
     let found = downloads.iter().find(|j| j.id() == job.id()).unwrap();
     assert_eq!(found.status(), DownloadStatus::Failed);
-    assert!(found
-        .error_message()
-        .unwrap()
-        .contains("yt-dlp stream error"));
+    assert!(
+        found
+            .error_message()
+            .unwrap()
+            .contains("yt-dlp stream error")
+    );
 
     let _ = tokio::fs::remove_dir_all(&test_dir).await;
 }
@@ -886,11 +896,13 @@ async fn test_failed_jobs_and_retries_do_not_write_history() {
         history.is_empty(),
         "failed jobs must never be recorded in history"
     );
-    assert!(service
-        .list_downloads()
-        .await
-        .iter()
-        .any(|j| j.id() == retried.id() && j.status() == DownloadStatus::Failed));
+    assert!(
+        service
+            .list_downloads()
+            .await
+            .iter()
+            .any(|j| j.id() == retried.id() && j.status() == DownloadStatus::Failed)
+    );
 
     let _ = tokio::fs::remove_dir_all(&test_dir).await;
 }
@@ -1374,35 +1386,41 @@ fn test_history_entry_rejects_relative_and_traversal_paths() {
     let url = MediaUrl::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
     let preset = DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P720).unwrap();
 
-    assert!(DownloadHistoryEntry::new(
-        DownloadId::new(),
-        url.clone(),
-        "T".to_string(),
-        preset,
-        "relative/video.mp4".to_string(),
-        None,
-    )
-    .is_err());
+    assert!(
+        DownloadHistoryEntry::new(
+            DownloadId::new(),
+            url.clone(),
+            "T".to_string(),
+            preset,
+            "relative/video.mp4".to_string(),
+            None,
+        )
+        .is_err()
+    );
 
-    assert!(DownloadHistoryEntry::new(
-        DownloadId::new(),
-        url.clone(),
-        "T".to_string(),
-        preset,
-        abs_path("downloads/../../etc/passwd"),
-        None,
-    )
-    .is_err());
+    assert!(
+        DownloadHistoryEntry::new(
+            DownloadId::new(),
+            url.clone(),
+            "T".to_string(),
+            preset,
+            abs_path("downloads/../../etc/passwd"),
+            None,
+        )
+        .is_err()
+    );
 
-    assert!(DownloadHistoryEntry::new(
-        DownloadId::new(),
-        url,
-        "T".to_string(),
-        preset,
-        abs_path("downloads/with\0null.mp4"),
-        None,
-    )
-    .is_err());
+    assert!(
+        DownloadHistoryEntry::new(
+            DownloadId::new(),
+            url,
+            "T".to_string(),
+            preset,
+            abs_path("downloads/with\0null.mp4"),
+            None,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1818,12 +1836,13 @@ async fn test_non_retryable_failure_is_immediate() {
         0,
         "no retry for a permanent failure"
     );
-    assert!(sink
-        .warnings
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .iter()
-        .all(|c| c != "RETRY_ATTEMPT"));
+    assert!(
+        sink.warnings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .all(|c| c != "RETRY_ATTEMPT")
+    );
 
     let _ = tokio::fs::remove_dir_all(&test_dir).await;
 }
@@ -1863,10 +1882,12 @@ async fn test_exhausted_retries_end_in_failed_with_original_error() {
         .unwrap();
     assert_eq!(finished.status(), DownloadStatus::Failed);
     assert_eq!(finished.retry_count(), 2, "1 initial attempt + 2 retries");
-    assert!(finished
-        .error_message()
-        .unwrap()
-        .contains("yt-dlp stream error"));
+    assert!(
+        finished
+            .error_message()
+            .unwrap()
+            .contains("yt-dlp stream error")
+    );
     assert!(service.list_history().await.unwrap().is_empty());
 
     let _ = tokio::fs::remove_dir_all(&test_dir).await;

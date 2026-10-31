@@ -9,6 +9,7 @@
 use crate::aggregator::MultiStreamProgressAggregator;
 use crate::detect_cookies_diagnostic;
 use crate::error_classifier::{classify_ytdlp_error, is_outdated_engine_message};
+use polysaver_binres::{background_command, read_line_lossy};
 use polysaver_core::error::{CoreError, DownloadErrorCode, DownloadErrorDetails};
 use polysaver_core::ports::media_downloader::StreamProgress;
 use regex::Regex;
@@ -16,8 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::LazyLock;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::io::BufReader;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -64,16 +64,22 @@ impl YtDlpProcessRunner {
         progress_callback: Option<Arc<dyn Fn(StreamProgress) + Send + Sync>>,
         version: Option<String>,
     ) -> Result<ProcessRunResult, CoreError> {
-        if let Some(token) = cancellation_token {
-            if token.is_cancelled() {
-                return Err(CoreError::OperationCancelled);
-            }
+        if let Some(token) = cancellation_token
+            && token.is_cancelled()
+        {
+            return Err(CoreError::OperationCancelled);
         }
 
-        let mut cmd = Command::new(ytdlp_bin);
+        let mut cmd = background_command(ytdlp_bin);
         cmd.arg("--ignore-config");
         cmd.arg("--no-playlist");
         cmd.arg("--no-colors");
+        // With a redirected stdout, yt-dlp writes in the ANSI code page on
+        // Windows (cp1252): accented titles and output paths would then reach
+        // us as invalid UTF-8. Force UTF-8 at both the Python and yt-dlp level.
+        cmd.arg("--encoding").arg("utf-8");
+        cmd.env("PYTHONIOENCODING", "utf-8");
+        cmd.env("PYTHONUTF8", "1");
 
         if let Some(ff) = ffmpeg_bin {
             cmd.arg("--ffmpeg-location");
@@ -117,9 +123,9 @@ impl YtDlpProcessRunner {
 
         let stderr_collector = Arc::clone(&stderr_lines);
         let stderr_task = tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            while let Some(line) = read_line_lossy(&mut reader, &mut buf).await {
                 let trimmed = line.trim().to_string();
                 if !trimmed.is_empty() {
                     let mut lock = stderr_collector.lock().await;
@@ -139,25 +145,25 @@ impl YtDlpProcessRunner {
         let stdout_collector = Arc::clone(&stdout_lines_buf);
 
         let stdout_task = tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            while let Some(line) = read_line_lossy(&mut reader, &mut buf).await {
                 let trimmed = line.trim().to_string();
                 if trimmed.is_empty() {
                     continue;
                 }
 
                 // Check for [POLYSAVER_META] line (from --print before_dl:...)
-                if trimmed.contains("[POLYSAVER_META]") {
-                    if let Some(meta) = parse_polysaver_meta_line(&trimmed) {
-                        let mut agg_lock = aggregator_ref.lock().await;
-                        for (idx, stream_id) in meta.format_ids.iter().enumerate() {
-                            let size = meta.stream_sizes.get(idx).copied().flatten();
-                            agg_lock.register_stream_size(stream_id, size);
-                        }
-                        let mut meta_lock = early_meta_collector.lock().await;
-                        *meta_lock = Some(meta);
+                if trimmed.contains("[POLYSAVER_META]")
+                    && let Some(meta) = parse_polysaver_meta_line(&trimmed)
+                {
+                    let mut agg_lock = aggregator_ref.lock().await;
+                    for (idx, stream_id) in meta.format_ids.iter().enumerate() {
+                        let size = meta.stream_sizes.get(idx).copied().flatten();
+                        agg_lock.register_stream_size(stream_id, size);
                     }
+                    let mut meta_lock = early_meta_collector.lock().await;
+                    *meta_lock = Some(meta);
                 }
 
                 // Check for [POLYSAVER_OUTPUT] line
@@ -252,17 +258,16 @@ impl YtDlpProcessRunner {
         output_files.retain(|p| p.exists() && p.is_file());
 
         // Fallback: if no output explicitly captured, inspect temp_dir
-        if output_files.is_empty() {
-            if let Ok(mut read_dir) = tokio::fs::read_dir(temp_dir).await {
-                while let Ok(Some(entry)) = read_dir.next_entry().await {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Ok(meta) = entry.metadata().await {
-                            if meta.len() > 0 {
-                                output_files.push(path);
-                            }
-                        }
-                    }
+        if output_files.is_empty()
+            && let Ok(mut read_dir) = tokio::fs::read_dir(temp_dir).await
+        {
+            while let Ok(Some(entry)) = read_dir.next_entry().await {
+                let path = entry.path();
+                if path.is_file()
+                    && let Ok(meta) = entry.metadata().await
+                    && meta.len() > 0
+                {
+                    output_files.push(path);
                 }
             }
         }
@@ -319,7 +324,7 @@ fn libc_kill(pid: i32) -> i32 {
 }
 
 #[cfg(unix)]
-extern "C" {
+unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
@@ -347,10 +352,10 @@ pub fn parse_polysaver_meta_line(line: &str) -> Option<EarlyMediaMetadata> {
             }
         } else if let Some(val) = trimmed.strip_prefix("duration:") {
             let clean = val.trim();
-            if let Ok(d) = clean.parse::<f64>() {
-                if d > 0.0 {
-                    meta.duration_seconds = Some(d.round() as u64);
-                }
+            if let Ok(d) = clean.parse::<f64>()
+                && d > 0.0
+            {
+                meta.duration_seconds = Some(d.round() as u64);
             }
         } else if let Some(val) = trimmed.strip_prefix("fallback_id:") {
             let clean = val.trim();
@@ -361,14 +366,14 @@ pub fn parse_polysaver_meta_line(line: &str) -> Option<EarlyMediaMetadata> {
             fallback_size = parse_optional_size(val);
         } else if let Some(rest) = trimmed.strip_prefix('f') {
             // Indexed entries: `0:137|50000000`
-            if let Some((idx_str, payload)) = rest.split_once(':') {
-                if let Ok(idx) = idx_str.parse::<u8>() {
-                    let mut parts = payload.split('|');
-                    let id = parts.next().unwrap_or("").trim();
-                    let size = parts.next().and_then(parse_optional_size);
-                    if !id.is_empty() && id != "NA" && id != "None" {
-                        stream_entries.push((idx, id.to_string(), size));
-                    }
+            if let Some((idx_str, payload)) = rest.split_once(':')
+                && let Ok(idx) = idx_str.parse::<u8>()
+            {
+                let mut parts = payload.split('|');
+                let id = parts.next().unwrap_or("").trim();
+                let size = parts.next().and_then(parse_optional_size);
+                if !id.is_empty() && id != "NA" && id != "None" {
+                    stream_entries.push((idx, id.to_string(), size));
                 }
             }
         }
@@ -381,11 +386,11 @@ pub fn parse_polysaver_meta_line(line: &str) -> Option<EarlyMediaMetadata> {
     }
 
     // Single-file selection: `requested_formats` was unavailable, use the fallback.
-    if meta.format_ids.is_empty() {
-        if let Some(id) = fallback_id {
-            meta.format_ids.push(id);
-            meta.stream_sizes.push(fallback_size);
-        }
+    if meta.format_ids.is_empty()
+        && let Some(id) = fallback_id
+    {
+        meta.format_ids.push(id);
+        meta.stream_sizes.push(fallback_size);
     }
 
     Some(meta)
@@ -431,22 +436,22 @@ pub fn parse_polysaver_progress_line_with_stream(
             total_bytes_estimate = parse_optional_size(val);
         } else if let Some(val) = token.strip_prefix("speed:") {
             let clean = val.trim().trim_end_matches("B/s").trim();
-            if clean != "NA" && clean != "None" {
-                if let Ok(s) = clean.parse::<f64>() {
-                    if s > 0.0 {
-                        speed_bytes = Some(s as u64);
-                    }
-                }
+            if clean != "NA"
+                && clean != "None"
+                && let Ok(s) = clean.parse::<f64>()
+                && s > 0.0
+            {
+                speed_bytes = Some(s as u64);
             }
         } else if let Some(val) = token.strip_prefix("stream:") {
             let clean = val.trim();
             if !clean.is_empty() && clean != "NA" && clean != "None" {
                 stream_id = Some(clean.to_string());
             }
-        } else if let Some(val) = token.strip_prefix("status:") {
-            if val.trim().eq_ignore_ascii_case("finished") {
-                status_finished = true;
-            }
+        } else if let Some(val) = token.strip_prefix("status:")
+            && val.trim().eq_ignore_ascii_case("finished")
+        {
+            status_finished = true;
         }
     }
 
@@ -554,8 +559,7 @@ mod tests {
     #[test]
     fn test_parse_progress_line_without_stream_id() {
         // A line followed by a NA stream id must still be usable.
-        let line =
-            "[POLYSAVER_PROGRESS] status:downloading downloaded:0 total:1000 est:NA speed:NA stream:NA";
+        let line = "[POLYSAVER_PROGRESS] status:downloading downloaded:0 total:1000 est:NA speed:NA stream:NA";
         let (stream, parsed, finished) = parse_polysaver_progress_line_with_stream(line).unwrap();
         assert_eq!(stream, None);
         assert_eq!(parsed.downloaded_bytes, Some(0));

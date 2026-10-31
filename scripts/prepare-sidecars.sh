@@ -10,7 +10,8 @@ TARGET_BIN_DIR="${ROOT_DIR}/src-tauri/resources/bin"
 
 # Pinned exact versions (yt-dlp version is centralized in ytdlp-version.txt)
 YTDLP_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/ytdlp-version.txt")"
-FFMPEG_VERSION="9.0.1"
+FFMPEG_VERSION="9.0.1"          # macOS: built from the source tarball
+FFMPEG_BTBN_VERSION="9.0.2"     # Windows/Linux: newest BtbN 9.0 autobuild
 
 # Target platform selection (default: auto-detect)
 PLATFORM="${1:-auto}"
@@ -100,7 +101,7 @@ verify_hash() {
 case "${PLATFORM}" in
     macos-aarch64|macos-x86_64)
         YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
-        YTDLP_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
+        YTDLP_SHA256="0f922c15ccc0b83eefa1c8bc9104e434318c4bf16e408e1ee93b7745a6efe0aa"
         FFMPEG_BIN_SHA256="5c2f76b122c6c5bfae448d3fe1aa3ce9f272952d3ec574e079594fa161101935"
         FFPROBE_BIN_SHA256="d4d3cbd541eac6c005bdb60decd4ee1a7a7d68df9eb5c0daab9da5e6fb1c6360"
 
@@ -246,12 +247,12 @@ EOF
 
     windows-x64)
         YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp.exe"
-        YTDLP_SHA256="66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
+        YTDLP_SHA256="f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d"
         # Pinned upstream autobuild. BtbN prunes old tags, so a pinned tag can
         # disappear: when this URL 404s, pick the newest autobuild-* tag and refresh
         # both the filename and the hash from that release's checksums.sha256.
-        FFMPEG_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-12-13-12/ffmpeg-n9.0.1-29-gad500d59cb-win64-gpl-9.0.zip"
-        FFMPEG_ZIP_SHA256="e536631f802a668172209a7f3f12bd7b87cd05dccebb498da7a518a3d6d3d037"
+        FFMPEG_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-win64-gpl-9.0.zip"
+        FFMPEG_ZIP_SHA256="693f3e224bc184b40524a62ca47526cfebaf2504414021b92fe75f677ad868b9"
 
         # 1. yt-dlp.exe
         echo "[DOWNLOADING] yt-dlp.exe ${YTDLP_VERSION} for Windows x64..."
@@ -260,7 +261,7 @@ EOF
         verify_hash "${YTDLP_TARGET}" "${YTDLP_SHA256}"
 
         # 2. FFmpeg & FFprobe .exe
-        echo "[DOWNLOADING] FFmpeg ${FFMPEG_VERSION} package for Windows x64..."
+        echo "[DOWNLOADING] FFmpeg ${FFMPEG_BTBN_VERSION} package for Windows x64..."
         TEMP_DIR="$(mktemp -d)"
         FFMPEG_ZIP="${TEMP_DIR}/ffmpeg_win64.zip"
         download "${FFMPEG_ZIP_URL}" "${FFMPEG_ZIP}"
@@ -278,12 +279,12 @@ EOF
 
     linux-x64)
         YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux"
-        YTDLP_SHA256="58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"
+        YTDLP_SHA256="767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795"
         # Pinned upstream autobuild. BtbN prunes old tags, so a pinned tag can
         # disappear: when this URL 404s, pick the newest autobuild-* tag and refresh
         # both the filename and the hash from that release's checksums.sha256.
-        FFMPEG_TAR_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-12-13-12/ffmpeg-n9.0.1-29-gad500d59cb-linux64-gpl-9.0.tar.xz"
-        FFMPEG_TAR_SHA256="223d14701f64c3d3df08f8e4fc712e6d4b36d75d5ec5bd1c4ce190a33778cee8"
+        FFMPEG_TAR_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-linux64-gpl-9.0.tar.xz"
+        FFMPEG_TAR_SHA256="73e29a56974ae5a651133a04584c7483b21afe941e17dc91d79814a758b608d3"
 
         # 1. yt-dlp
         echo "[DOWNLOADING] yt-dlp ${YTDLP_VERSION} for Linux x64..."
@@ -293,7 +294,7 @@ EOF
         chmod +x "${YTDLP_TARGET}"
 
         # 2. FFmpeg & FFprobe
-        echo "[DOWNLOADING] FFmpeg ${FFMPEG_VERSION} package for Linux x64..."
+        echo "[DOWNLOADING] FFmpeg ${FFMPEG_BTBN_VERSION} package for Linux x64..."
         TEMP_DIR="$(mktemp -d)"
         FFMPEG_TAR="${TEMP_DIR}/ffmpeg_linux64.tar.xz"
         download "${FFMPEG_TAR_URL}" "${FFMPEG_TAR}"

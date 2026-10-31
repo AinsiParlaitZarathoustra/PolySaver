@@ -65,10 +65,10 @@ impl DetectPlaylistService {
         // replaced it, and clearing it would then cancel the wrong detection.
         {
             let mut active = self.active.lock().await;
-            if let Some(current) = active.as_ref() {
-                if current == &token {
-                    *active = None;
-                }
+            if let Some(current) = active.as_ref()
+                && current == &token
+            {
+                *active = None;
             }
         }
 

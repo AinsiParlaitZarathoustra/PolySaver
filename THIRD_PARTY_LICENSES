@@ -8,20 +8,20 @@ PolySaver V2 embeds and/or interacts with third-party software components. This 
 
 ### yt-dlp
 - **Project**: [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-- **Version**: `2026.08.19`
+- **Version**: `2026.10.26`
 - **Platforms**:
-  - **macOS ARM64**: `yt-dlp_macos` (`0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202`)
-  - **Windows x64**: `yt-dlp.exe` (`66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a`)
-  - **Linux x64**: `yt-dlp_linux` (`58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a`)
+  - **macOS ARM64**: `yt-dlp_macos` (`0f922c15ccc0b83eefa1c8bc9104e434318c4bf16e408e1ee93b7745a6efe0aa`)
+  - **Windows x64**: `yt-dlp.exe` (`f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d`)
+  - **Linux x64**: `yt-dlp_linux` (`767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795`)
 - **License**: [The Unlicense](https://unlicense.org/) (Public Domain dedication)
 
 ### FFmpeg & FFprobe (Static standalone builds with AV1, MP3, FLAC, AAC, H.264)
 - **Project**: [FFmpeg](https://ffmpeg.org/)
-- **Version**: `9.0.1` (Release `Lei`)
+- **Version**: `9.0.1` (Release `Lei`) on macOS, `9.0.2` on Windows and Linux
 - **Platforms**:
   - **macOS ARM64**: Static build from source with `libdav1d` 1.5.3, `libmp3lame`, `libx264`, `VideoToolbox`, `AudioToolbox` (Source tarball SHA-256: `cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635`).
-  - **Windows x64**: BtbN reproducible static GPL release `ffmpeg-n9.0.1-6-g9d4ca21220-win64-gpl-9.0.zip` (Archive SHA-256: `7b777da65c0f93a3f9f524997b2852612d984e39249ca241b63da193ce7e4435`).
-  - **Linux x64**: BtbN reproducible static GPL release `ffmpeg-n9.0.1-6-g9d4ca21220-linux64-gpl-9.0.tar.xz` (Archive SHA-256: `b32f5844b258b4367896b1aa6839ee72ee96d5c7c9136873f66b3c4a1fc2c1df`).
+  - **Windows x64**: BtbN reproducible static GPL release `ffmpeg-n9.0.2-39-g7adfbe40dc-win64-gpl-9.0.zip` (Archive SHA-256: `693f3e224bc184b40524a62ca47526cfebaf2504414021b92fe75f677ad868b9`).
+  - **Linux x64**: BtbN reproducible static GPL release `ffmpeg-n9.0.2-39-g7adfbe40dc-linux64-gpl-9.0.tar.xz` (Archive SHA-256: `73e29a56974ae5a651133a04584c7483b21afe941e17dc91d79814a758b608d3`).
 - **License**: GNU General Public License version 3.0+ (GPL-3.0-or-later)
 
 ### dav1d (AV1 Software Decoder)

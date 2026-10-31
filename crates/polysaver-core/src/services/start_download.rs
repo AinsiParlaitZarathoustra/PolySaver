@@ -530,7 +530,7 @@ impl StartDownloadService {
             }
         };
 
-        if let (Some(ref sink), Some(job)) = (event_sink, updated) {
+        if let (Some(sink), Some(job)) = (event_sink, updated) {
             sink.emit_queued(&job);
             sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
                 download_id: job_id,
@@ -575,10 +575,8 @@ impl StartDownloadService {
             t.cancel();
         }
 
-        if should_emit {
-            if let Some(ref sink) = self.event_sink {
-                sink.emit_canceled(&canceled_job);
-            }
+        if should_emit && let Some(ref sink) = self.event_sink {
+            sink.emit_canceled(&canceled_job);
         }
 
         Ok(canceled_job)
@@ -587,19 +585,19 @@ impl StartDownloadService {
     /// Dismisses a completed, failed, or canceled download job from the active in-memory list.
     pub async fn dismiss_download(&self, job_id: DownloadId) -> Result<(), CoreError> {
         let mut lock = self.active_jobs.lock().await;
-        if let Some(job) = lock.get(&job_id) {
-            if matches!(
+        if let Some(job) = lock.get(&job_id)
+            && matches!(
                 job.status(),
                 DownloadStatus::Queued
                     | DownloadStatus::Preparing
                     | DownloadStatus::Downloading
                     | DownloadStatus::Converting
                     | DownloadStatus::Finalizing
-            ) {
-                return Err(CoreError::InvalidState(
-                    "Cannot dismiss an active download; please cancel it first".to_string(),
-                ));
-            }
+            )
+        {
+            return Err(CoreError::InvalidState(
+                "Cannot dismiss an active download; please cancel it first".to_string(),
+            ));
         }
         lock.remove(&job_id);
 
@@ -851,14 +849,14 @@ impl StartDownloadService {
         }
 
         // Non-fatal engine obsolescence signal: yt-dlp warns even on success.
-        if downloaded_streams.engine_outdated {
-            if let Some(ref sink) = ctx.event_sink {
-                sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
-                    download_id: ctx.job_id,
-                    code: "YTDLP_UPDATE_REQUIRED".to_string(),
-                    message: "Mettez à jour le moteur.".to_string(),
-                });
-            }
+        if downloaded_streams.engine_outdated
+            && let Some(ref sink) = ctx.event_sink
+        {
+            sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+                download_id: ctx.job_id,
+                code: "YTDLP_UPDATE_REQUIRED".to_string(),
+                message: "Mettez à jour le moteur.".to_string(),
+            });
         }
 
         // Cookie import problems are never silent: yt-dlp continues without
@@ -1086,11 +1084,11 @@ impl StartDownloadService {
 
         {
             let lock = ctx.active_jobs.lock().await;
-            if let Some(job) = lock.get(&ctx.job_id) {
-                if job.is_terminal() {
-                    let _ = tokio::fs::remove_dir_all(&job_temp_dir).await;
-                    return Err(CoreError::OperationCancelled);
-                }
+            if let Some(job) = lock.get(&ctx.job_id)
+                && job.is_terminal()
+            {
+                let _ = tokio::fs::remove_dir_all(&job_temp_dir).await;
+                return Err(CoreError::OperationCancelled);
             }
         }
 
@@ -1134,16 +1132,14 @@ impl StartDownloadService {
                 final_path_str,
                 None,
                 ctx.target_dir.to_string_lossy().to_string(),
-            ) {
-                if let Err(err) = ctx.history_repo.append(history_entry).await {
-                    if let Some(ref sink) = ctx.event_sink {
-                        sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
-                            download_id: ctx.job_id,
-                            code: "HISTORY_SAVE_FAILED".to_string(),
-                            message: format!("Failed to record download history: {err}"),
-                        });
-                    }
-                }
+            ) && let Err(err) = ctx.history_repo.append(history_entry).await
+                && let Some(ref sink) = ctx.event_sink
+            {
+                sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+                    download_id: ctx.job_id,
+                    code: "HISTORY_SAVE_FAILED".to_string(),
+                    message: format!("Failed to record download history: {err}"),
+                });
             }
 
             if let Some(ref sink) = ctx.event_sink {
@@ -1180,7 +1176,7 @@ impl StartDownloadService {
             tokens.remove(&job_id);
         }
 
-        if let (Some(ref sink), Some(job)) = (event_sink, canceled_job) {
+        if let (Some(sink), Some(job)) = (event_sink, canceled_job) {
             sink.emit_canceled(&job);
         }
     }
@@ -1212,7 +1208,7 @@ impl StartDownloadService {
             tokens.remove(&job_id);
         }
 
-        if let (Some(ref sink), Some(job)) = (event_sink, failed_job) {
+        if let (Some(sink), Some(job)) = (event_sink, failed_job) {
             sink.emit_failed(&job, &error);
         }
     }
@@ -1436,10 +1432,10 @@ async fn publish_media_no_clobber(
         match std::fs::hard_link(&stage_path, &candidate_path) {
             Ok(()) => {
                 // Flush the published file before removing the staging link.
-                if let Ok(file) = std::fs::File::open(&candidate_path) {
-                    if let Err(err) = file.sync_all() {
-                        emit_publish_sync_warning(event_sink, job_id, &candidate_path, &err);
-                    }
+                if let Ok(file) = std::fs::File::open(&candidate_path)
+                    && let Err(err) = file.sync_all()
+                {
+                    emit_publish_sync_warning(event_sink, job_id, &candidate_path, &err);
                 }
                 let _ = tokio::fs::remove_file(&stage_path).await;
                 return Ok(candidate_path);

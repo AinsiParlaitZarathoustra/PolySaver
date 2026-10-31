@@ -17,7 +17,9 @@ fn bundled_downloader() -> YtDlpDownloader {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let resource_bin_dir = manifest_dir.join("resources/bin");
     assert!(
-        resource_bin_dir.join("yt-dlp").exists(),
+        resource_bin_dir
+            .join(format!("yt-dlp{}", std::env::consts::EXE_SUFFIX))
+            .exists(),
         "bundled yt-dlp missing at {} — run scripts/prepare-sidecars.sh",
         resource_bin_dir.display()
     );

@@ -71,10 +71,10 @@ impl AnalyzeUrlService {
         // Only clear the slot if it still holds our token; a newer analysis may have replaced it.
         {
             let mut active = self.active.lock().await;
-            if let Some(current) = active.as_ref() {
-                if current == &token {
-                    *active = None;
-                }
+            if let Some(current) = active.as_ref()
+                && current == &token
+            {
+                *active = None;
             }
         }
 

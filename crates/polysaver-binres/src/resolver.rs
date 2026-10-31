@@ -2,11 +2,11 @@
 // Copyright (C) 2026 PolySaver contributors
 
 use crate::error::{BinResError, BinaryKind};
+use crate::process::background_command;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::process::Command;
 use tokio::sync::RwLock;
 /// Information about a verified, resolved binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,12 +67,12 @@ impl BinaryResolver {
         // 1. Check existing cached resolution
         {
             let read_guard = self.cache.read().await;
-            if let Some(cached) = read_guard.get(&kind) {
-                if let Ok(meta) = std::fs::metadata(&cached.path) {
-                    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                    if meta.len() == cached.size && mtime == cached.modified {
-                        return Ok(cached.clone());
-                    }
+            if let Some(cached) = read_guard.get(&kind)
+                && let Ok(meta) = std::fs::metadata(&cached.path)
+            {
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                if meta.len() == cached.size && mtime == cached.modified {
+                    return Ok(cached.clone());
                 }
             }
         }
@@ -116,6 +116,15 @@ impl BinaryResolver {
             if app_bin_first {
                 let app_candidate = self.app_bin_dir.join(name);
                 if let Ok(resolved) = verify_binary_file(kind, &app_candidate).await {
+                    // An app upgrade can bundle a newer engine than the one a
+                    // previous version downloaded: never let that stale copy win.
+                    if kind == BinaryKind::YtDlp
+                        && let Some(ref res_dir) = self.resource_bin_dir
+                        && let Ok(bundled) = verify_binary_file(kind, &res_dir.join(name)).await
+                        && is_newer_version(&bundled.version, &resolved.version)
+                    {
+                        return Ok(bundled);
+                    }
                     return Ok(resolved);
                 }
                 // Runtime installs use a dedicated subdirectory:
@@ -156,23 +165,23 @@ impl BinaryResolver {
             }
 
             // Priority 4: Sibling next to current executable
-            if let Ok(current_exe) = std::env::current_exe() {
-                if let Some(exe_dir) = current_exe.parent() {
-                    // Sibling exe
-                    let sibling = exe_dir.join(name);
-                    if let Ok(resolved) = verify_binary_file(kind, &sibling).await {
-                        return Ok(resolved);
-                    }
-                    // Sibling bin/ directory
-                    let bin_sibling = exe_dir.join("bin").join(name);
-                    if let Ok(resolved) = verify_binary_file(kind, &bin_sibling).await {
-                        return Ok(resolved);
-                    }
-                    // macOS bundle structure ../Resources/bin/
-                    let res_sibling = exe_dir.join("../Resources/bin").join(name);
-                    if let Ok(resolved) = verify_binary_file(kind, &res_sibling).await {
-                        return Ok(resolved);
-                    }
+            if let Ok(current_exe) = std::env::current_exe()
+                && let Some(exe_dir) = current_exe.parent()
+            {
+                // Sibling exe
+                let sibling = exe_dir.join(name);
+                if let Ok(resolved) = verify_binary_file(kind, &sibling).await {
+                    return Ok(resolved);
+                }
+                // Sibling bin/ directory
+                let bin_sibling = exe_dir.join("bin").join(name);
+                if let Ok(resolved) = verify_binary_file(kind, &bin_sibling).await {
+                    return Ok(resolved);
+                }
+                // macOS bundle structure ../Resources/bin/
+                let res_sibling = exe_dir.join("../Resources/bin").join(name);
+                if let Ok(resolved) = verify_binary_file(kind, &res_sibling).await {
+                    return Ok(resolved);
                 }
             }
 
@@ -201,6 +210,30 @@ impl BinaryResolver {
 
         Err(BinResError::NotFound { kind })
     }
+}
+
+/// True when dotted numeric version `candidate` (`YYYY.MM.DD[.REV]`) is strictly
+/// newer than `current`. Unparsable versions never count as newer.
+///
+/// Mirrors `polysaver_core::domain::engine_version::compare_versions`, which this
+/// leaf crate cannot depend on.
+fn is_newer_version(candidate: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Option<Vec<u64>> {
+        v.trim().split('.').map(|p| p.parse::<u64>().ok()).collect()
+    };
+    let (Some(a), Some(b)) = (parse(candidate), parse(current)) else {
+        return false;
+    };
+    for i in 0..a.len().max(b.len()) {
+        let (av, bv) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
+        if av != bv {
+            return av > bv;
+        }
+    }
+    false
 }
 
 /// Generates platform-appropriate file candidate names.
@@ -377,7 +410,7 @@ pub async fn query_binary_version(
     bin_path: &Path,
 ) -> Result<String, BinResError> {
     let flag = kind.version_flag();
-    let mut cmd = Command::new(bin_path);
+    let mut cmd = background_command(bin_path);
     cmd.arg(flag);
 
     let output = cmd.output().await.map_err(|err| BinResError::SpawnFailed {
@@ -392,15 +425,15 @@ pub async fn query_binary_version(
         } else {
             "--version"
         };
-        let mut alt_cmd = Command::new(bin_path);
+        let mut alt_cmd = background_command(bin_path);
         alt_cmd.arg(alt_flag);
-        if let Ok(alt_out) = alt_cmd.output().await {
-            if alt_out.status.success() {
-                let stdout = String::from_utf8_lossy(&alt_out.stdout);
-                let first_line = stdout.lines().next().unwrap_or("").trim().to_string();
-                if !first_line.is_empty() {
-                    return Ok(first_line);
-                }
+        if let Ok(alt_out) = alt_cmd.output().await
+            && alt_out.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&alt_out.stdout);
+            let first_line = stdout.lines().next().unwrap_or("").trim().to_string();
+            if !first_line.is_empty() {
+                return Ok(first_line);
             }
         }
 
@@ -560,6 +593,13 @@ mod tests {
         assert_eq!(resolved.version, "2026.08.19");
         assert_eq!(resolved.path, app_dir.join("yt-dlp"));
 
+        // After an app upgrade bundling a newer engine, the stale download loses.
+        write_mock(&res_dir.join("yt-dlp"), "2026.10.26");
+        resolver.invalidate_all().await;
+        let upgraded = resolver.resolve_ytdlp().await.unwrap();
+        assert_eq!(upgraded.version, "2026.10.26");
+        assert_eq!(upgraded.path, res_dir.join("yt-dlp"));
+
         // ffmpeg keeps the bundled-resources-first order.
         write_mock(&res_dir.join("ffmpeg"), "9.0.1");
         write_mock(&app_dir.join("ffmpeg"), "8.0.0");
@@ -637,6 +677,17 @@ mod tests {
         assert_eq!(flat.path, flat_dir.join(node_name));
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// Decides when a bundled engine shadows a stale app-data download.
+    #[test]
+    fn test_is_newer_version() {
+        assert!(is_newer_version("2026.10.26", "2026.08.19"));
+        assert!(is_newer_version("2026.10.26.1", "2026.10.26"));
+        assert!(!is_newer_version("2026.10.26", "2026.10.26"));
+        assert!(!is_newer_version("2026.10.26", "2026.10.30.232658"));
+        assert!(!is_newer_version("nightly", "2026.08.19"));
+        assert!(!is_newer_version("2026.10.26", "unknown"));
     }
 
     /// JS runtimes prefer the app directory, ffmpeg/ffprobe keep resources first.

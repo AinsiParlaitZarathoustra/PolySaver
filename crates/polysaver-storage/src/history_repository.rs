@@ -180,26 +180,23 @@ impl JsonDownloadHistoryRepository {
             return Ok(());
         }
 
-        if let Ok(raw_bytes) = tokio::fs::read(&self.legacy_file).await {
-            if !raw_bytes.is_empty() {
-                if let Ok(doc) =
-                    serde_json::from_slice::<LegacyDownloadHistoryDocumentDto>(&raw_bytes)
-                {
-                    let mut lines = Vec::new();
-                    for entry_dto in doc.entries {
-                        let op = HistoryJournalOp::Upsert {
-                            v: HISTORY_SCHEMA_VERSION,
-                            entry: entry_dto,
-                        };
-                        if let Ok(json_line) = serde_json::to_string(&op) {
-                            lines.push(json_line);
-                        }
-                    }
-                    if !lines.is_empty() {
-                        let content = format!("{}\n", lines.join("\n"));
-                        let _ = tokio::fs::write(&self.ndjson_file, content.as_bytes()).await;
-                    }
+        if let Ok(raw_bytes) = tokio::fs::read(&self.legacy_file).await
+            && !raw_bytes.is_empty()
+            && let Ok(doc) = serde_json::from_slice::<LegacyDownloadHistoryDocumentDto>(&raw_bytes)
+        {
+            let mut lines = Vec::new();
+            for entry_dto in doc.entries {
+                let op = HistoryJournalOp::Upsert {
+                    v: HISTORY_SCHEMA_VERSION,
+                    entry: entry_dto,
+                };
+                if let Ok(json_line) = serde_json::to_string(&op) {
+                    lines.push(json_line);
                 }
+            }
+            if !lines.is_empty() {
+                let content = format!("{}\n", lines.join("\n"));
+                let _ = tokio::fs::write(&self.ndjson_file, content.as_bytes()).await;
             }
         }
 
@@ -289,7 +286,9 @@ impl JsonDownloadHistoryRepository {
                 Err(parse_err) => {
                     // If this is the last line in the file, it could be an incomplete write from a sudden crash/power loss
                     if idx + 1 == total_lines {
-                        eprintln!("[PolySaver History] Ignoring truncated trailing journal line: {parse_err}");
+                        eprintln!(
+                            "[PolySaver History] Ignoring truncated trailing journal line: {parse_err}"
+                        );
                     } else {
                         eprintln!(
                             "[PolySaver History] Corrupted journal line {}: {parse_err}",
@@ -690,9 +689,11 @@ mod tests {
         // Verify ndjson file exists and legacy file was renamed to .migrated
         assert!(repo.history_file().exists());
         assert!(!legacy_file.exists());
-        assert!(temp_dir
-            .join(format!("{LEGACY_JSON_HISTORY_FILE_NAME}.migrated"))
-            .exists());
+        assert!(
+            temp_dir
+                .join(format!("{LEGACY_JSON_HISTORY_FILE_NAME}.migrated"))
+                .exists()
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

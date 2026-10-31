@@ -629,7 +629,7 @@ pub(crate) async fn replace_binary(temp_path: &Path, final_path: &Path) -> Resul
 
 /// Runs `--version` on the installed binary to confirm it is valid.
 async fn query_installed_version(binary: &Path) -> Result<String, CoreError> {
-    let output = tokio::process::Command::new(binary)
+    let output = polysaver_binres::background_command(binary)
         .arg("--version")
         .output()
         .await
@@ -879,9 +879,10 @@ cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  yt-dlp.exe
             let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
             assert_eq!(mode & 0o111, 0o111, "installed binary must be executable");
         }
-        assert!(!dir
-            .join(format!("{}.new", engine_binary_file_name()))
-            .exists());
+        assert!(
+            !dir.join(format!("{}.new", engine_binary_file_name()))
+                .exists()
+        );
 
         // 3. The repository resolver must now prefer this updated binary.
         let resolver = polysaver_binres::BinaryResolver::new(dir.clone(), None);

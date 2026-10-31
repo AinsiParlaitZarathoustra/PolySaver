@@ -3,14 +3,14 @@
 
 //! Asynchronous non-blocking FFmpeg process runner with progress streaming and diagnostic stderr capture.
 
+use polysaver_binres::{background_command, read_line_lossy};
 use polysaver_core::error::{CoreError, DownloadErrorCode, DownloadErrorDetails};
 use polysaver_core::ports::ConverterProgress;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::io::BufReader;
 
 /// Maximum number of stderr lines retained in memory for diagnostic reporting.
 const MAX_STDERR_LINES: usize = 25;
@@ -35,13 +35,13 @@ impl FfmpegProcessRunner {
         cancellation_token: Option<&tokio_util::sync::CancellationToken>,
         progress_callback: Option<Arc<dyn Fn(ConverterProgress) + Send + Sync>>,
     ) -> Result<FfmpegRunResult, CoreError> {
-        if let Some(token) = cancellation_token {
-            if token.is_cancelled() {
-                return Err(CoreError::OperationCancelled);
-            }
+        if let Some(token) = cancellation_token
+            && token.is_cancelled()
+        {
+            return Err(CoreError::OperationCancelled);
         }
 
-        let mut cmd = Command::new(ffmpeg_bin);
+        let mut cmd = background_command(ffmpeg_bin);
         cmd.args(args)
             .current_dir(working_dir)
             .stdout(Stdio::piped())
@@ -66,10 +66,11 @@ impl FfmpegProcessRunner {
 
         // 1. Asynchronous stdout reader task for -progress pipe:1
         let stdout_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
             let mut current_time_us: Option<u64> = None;
 
-            while let Ok(Some(line)) = reader.next_line().await {
+            while let Some(line) = read_line_lossy(&mut reader, &mut buf).await {
                 let trimmed = line.trim();
                 if let Some(val) = trimmed.strip_prefix("out_time_us=") {
                     if let Ok(us) = val.parse::<u64>() {
@@ -88,35 +89,32 @@ impl FfmpegProcessRunner {
                         }
                     }
                 } else if let Some(val) = trimmed.strip_prefix("out_time=") {
-                    if current_time_us.is_none() {
-                        if let Some(us) = parse_time_string_to_us(val) {
-                            if let Some(dur) = duration_seconds {
-                                if dur > 0 {
-                                    let total_us = dur.saturating_mul(1_000_000);
-                                    let pct = ((us as f64 / total_us as f64) * 100.0)
-                                        .clamp(0.0, 99.0)
-                                        as u8;
-                                    if let Some(ref cb) = progress_callback {
-                                        cb(ConverterProgress { percent: Some(pct) });
-                                    }
-                                }
-                            }
+                    if current_time_us.is_none()
+                        && let Some(us) = parse_time_string_to_us(val)
+                        && let Some(dur) = duration_seconds
+                        && dur > 0
+                    {
+                        let total_us = dur.saturating_mul(1_000_000);
+                        let pct = ((us as f64 / total_us as f64) * 100.0).clamp(0.0, 99.0) as u8;
+                        if let Some(ref cb) = progress_callback {
+                            cb(ConverterProgress { percent: Some(pct) });
                         }
                     }
-                } else if trimmed == "progress=end" {
-                    if let Some(ref cb) = progress_callback {
-                        cb(ConverterProgress { percent: Some(100) });
-                    }
+                } else if trimmed == "progress=end"
+                    && let Some(ref cb) = progress_callback
+                {
+                    cb(ConverterProgress { percent: Some(100) });
                 }
             }
         });
 
         // 2. Asynchronous stderr reader task with bounded memory ring buffer
         let stderr_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
+            let mut reader = BufReader::new(stderr);
+            let mut buf = Vec::new();
             let mut buffer = VecDeque::with_capacity(MAX_STDERR_LINES);
 
-            while let Ok(Some(line)) = reader.next_line().await {
+            while let Some(line) = read_line_lossy(&mut reader, &mut buf).await {
                 if buffer.len() >= MAX_STDERR_LINES {
                     buffer.pop_front();
                 }

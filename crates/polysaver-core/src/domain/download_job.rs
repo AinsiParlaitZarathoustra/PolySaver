@@ -318,13 +318,13 @@ impl DownloadJob {
                 });
             }
 
-            if let Some(current) = self.progress_percent {
-                if p < current {
-                    return Err(CoreError::InvalidProgress {
-                        current,
-                        attempted: p,
-                    });
-                }
+            if let Some(current) = self.progress_percent
+                && p < current
+            {
+                return Err(CoreError::InvalidProgress {
+                    current,
+                    attempted: p,
+                });
             }
             self.progress_percent = Some(p);
         }

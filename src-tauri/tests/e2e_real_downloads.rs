@@ -15,11 +15,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+/// Path of a bundled sidecar, with the platform executable suffix (`.exe` on Windows).
+fn sidecar(resource_bin_dir: &Path, name: &str) -> PathBuf {
+    resource_bin_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
 /// Verifies that all bundled sidecars strictly exist and match expected versions.
 fn assert_bundled_sidecars_valid(resource_bin_dir: &Path) {
-    let ytdlp_path = resource_bin_dir.join("yt-dlp");
-    let ffmpeg_path = resource_bin_dir.join("ffmpeg");
-    let ffprobe_path = resource_bin_dir.join("ffprobe");
+    let ytdlp_path = sidecar(resource_bin_dir, "yt-dlp");
+    let ffmpeg_path = sidecar(resource_bin_dir, "ffmpeg");
+    let ffprobe_path = sidecar(resource_bin_dir, "ffprobe");
 
     assert!(
         ytdlp_path.exists(),
@@ -56,7 +61,9 @@ fn assert_bundled_sidecars_valid(resource_bin_dir: &Path) {
         "Expected yt-dlp {expected_ytdlp_version}, got: {ytdlp_ver}"
     );
 
-    // 2. Verify ffmpeg version & configuration (including libdav1d)
+    // 2. Verify ffmpeg version & configuration (including libdav1d). Only the 9.0
+    // branch is pinned: macOS builds 9.0.1 from source while Windows/Linux use
+    // the newest BtbN 9.0.x autobuild, since older tags get pruned upstream.
     let ffmpeg_out = Command::new(&ffmpeg_path)
         .arg("-version")
         .output()
@@ -64,8 +71,8 @@ fn assert_bundled_sidecars_valid(resource_bin_dir: &Path) {
     assert!(ffmpeg_out.status.success());
     let ffmpeg_ver = String::from_utf8_lossy(&ffmpeg_out.stdout);
     assert!(
-        ffmpeg_ver.contains("9.0.1"),
-        "Expected ffmpeg 9.0.1, got: {}",
+        ffmpeg_ver.contains("version n9.0.") || ffmpeg_ver.contains("version 9.0."),
+        "Expected ffmpeg 9.0.x, got: {}",
         ffmpeg_ver.lines().next().unwrap_or("")
     );
     assert!(
@@ -81,8 +88,8 @@ fn assert_bundled_sidecars_valid(resource_bin_dir: &Path) {
     assert!(ffprobe_out.status.success());
     let ffprobe_ver = String::from_utf8_lossy(&ffprobe_out.stdout);
     assert!(
-        ffprobe_ver.contains("9.0.1"),
-        "Expected ffprobe 9.0.1, got: {}",
+        ffprobe_ver.contains("version n9.0.") || ffprobe_ver.contains("version 9.0."),
+        "Expected ffprobe 9.0.x, got: {}",
         ffprobe_ver.lines().next().unwrap_or("")
     );
 }
@@ -235,7 +242,7 @@ async fn test_real_matrix_youtube_and_tiktok_mp4_mov_mp3_flac() {
     // Strictly enforce bundled sidecars exist and are compliant
     assert_bundled_sidecars_valid(&resource_bin_dir);
 
-    let ffprobe_bin = resource_bin_dir.join("ffprobe");
+    let ffprobe_bin = sidecar(&resource_bin_dir, "ffprobe");
 
     let test_dir = std::env::temp_dir().join(format!("polysaver_e2e_sp6_{}", uuid::Uuid::new_v4()));
     let bin_dir = test_dir.join("bin");
@@ -378,13 +385,13 @@ async fn test_real_matrix_youtube_and_tiktok_mp4_mov_mp3_flac() {
     for _ in 0..120 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let list = service.list_downloads().await;
-        if let Some(j) = list.iter().find(|j| j.id() == unavail_job.id()) {
-            if j.status() == DownloadStatus::Failed {
-                let err = j.error_details().expect("Missing error details");
-                assert_eq!(err.code, DownloadErrorCode::FormatNotAvailable);
-                println!("SUCCESS: Exact height 2160p properly rejected with FORMAT_NOT_AVAILABLE");
-                break;
-            }
+        if let Some(j) = list.iter().find(|j| j.id() == unavail_job.id())
+            && j.status() == DownloadStatus::Failed
+        {
+            let err = j.error_details().expect("Missing error details");
+            assert_eq!(err.code, DownloadErrorCode::FormatNotAvailable);
+            println!("SUCCESS: Exact height 2160p properly rejected with FORMAT_NOT_AVAILABLE");
+            break;
         }
     }
 

@@ -518,52 +518,52 @@ mod tests {
                 .status()
                 .await;
 
-            if let Ok(s) = status {
-                if s.success() {
-                    // Test MP3 conversion
-                    let mp3_out = test_dir.join("synth.mp3");
-                    let res_mp3 = converter
-                        .convert(
-                            ConvertRequest::AudioTranscode {
-                                audio_input: synth_audio.clone(),
-                                output_path: mp3_out.clone(),
-                                codec: AudioCodec::Mp3(Mp3Quality::K192),
-                                duration_seconds: Some(1),
-                                temp_dir: test_dir.clone(),
-                            },
-                            None,
-                            None,
-                        )
-                        .await;
+            if let Ok(s) = status
+                && s.success()
+            {
+                // Test MP3 conversion
+                let mp3_out = test_dir.join("synth.mp3");
+                let res_mp3 = converter
+                    .convert(
+                        ConvertRequest::AudioTranscode {
+                            audio_input: synth_audio.clone(),
+                            output_path: mp3_out.clone(),
+                            codec: AudioCodec::Mp3(Mp3Quality::K192),
+                            duration_seconds: Some(1),
+                            temp_dir: test_dir.clone(),
+                        },
+                        None,
+                        None,
+                    )
+                    .await;
 
-                    assert!(res_mp3.is_ok(), "MP3 transcode failed: {:?}", res_mp3.err());
-                    assert!(mp3_out.exists());
-                    assert!(tokio::fs::metadata(&mp3_out).await.unwrap().len() > 0);
+                assert!(res_mp3.is_ok(), "MP3 transcode failed: {:?}", res_mp3.err());
+                assert!(mp3_out.exists());
+                assert!(tokio::fs::metadata(&mp3_out).await.unwrap().len() > 0);
 
-                    // Test FLAC conversion
-                    let flac_out = test_dir.join("synth.flac");
-                    let res_flac = converter
-                        .convert(
-                            ConvertRequest::AudioTranscode {
-                                audio_input: synth_audio,
-                                output_path: flac_out.clone(),
-                                codec: AudioCodec::Flac,
-                                duration_seconds: Some(1),
-                                temp_dir: test_dir.clone(),
-                            },
-                            None,
-                            None,
-                        )
-                        .await;
+                // Test FLAC conversion
+                let flac_out = test_dir.join("synth.flac");
+                let res_flac = converter
+                    .convert(
+                        ConvertRequest::AudioTranscode {
+                            audio_input: synth_audio,
+                            output_path: flac_out.clone(),
+                            codec: AudioCodec::Flac,
+                            duration_seconds: Some(1),
+                            temp_dir: test_dir.clone(),
+                        },
+                        None,
+                        None,
+                    )
+                    .await;
 
-                    assert!(
-                        res_flac.is_ok(),
-                        "FLAC transcode failed: {:?}",
-                        res_flac.err()
-                    );
-                    assert!(flac_out.exists());
-                    assert!(tokio::fs::metadata(&flac_out).await.unwrap().len() > 0);
-                }
+                assert!(
+                    res_flac.is_ok(),
+                    "FLAC transcode failed: {:?}",
+                    res_flac.err()
+                );
+                assert!(flac_out.exists());
+                assert!(tokio::fs::metadata(&flac_out).await.unwrap().len() > 0);
             }
         }
 

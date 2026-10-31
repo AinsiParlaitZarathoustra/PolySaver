@@ -15,17 +15,17 @@ pub mod updater;
 use async_trait::async_trait;
 use polysaver_binres::BinaryResolver;
 use polysaver_core::domain::{
-    CookiesBrowser, DownloadPreset, FormatOption, MediaUrl, OutputFormat, PlaylistEntry,
-    ProbeResult, PLAYLIST_ENTRIES_LIMIT,
+    CookiesBrowser, DownloadPreset, FormatOption, MediaUrl, OutputFormat, PLAYLIST_ENTRIES_LIMIT,
+    PlaylistEntry, ProbeResult,
 };
 use polysaver_core::error::{CoreError, DownloadErrorCode, DownloadErrorDetails};
+use polysaver_core::ports::MediaProvider;
 use polysaver_core::ports::media_downloader::{
     CookiesDiagnostic, DownloadStreamRequest, DownloadedStreams, JsRuntimeSpec, MediaDownloader,
     StreamProgress,
 };
 use polysaver_core::ports::playlist_detector::{PlaylistDetection, PlaylistDetector};
-use polysaver_core::ports::MediaProvider;
-use process_runner::{parse_fallback_progress_line, YtDlpProcessRunner};
+use process_runner::{YtDlpProcessRunner, parse_fallback_progress_line};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -553,7 +553,9 @@ impl MediaDownloader for YtDlpDownloader {
         let format_selector = match request.preset {
             DownloadPreset::Video { format, quality } => match (format, quality.target_height()) {
                 (OutputFormat::Mp4, Some(h)) => {
-                    format!("bestvideo[height={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height={h}]+bestaudio/best[height={h}]")
+                    format!(
+                        "bestvideo[height={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height={h}]+bestaudio/best[height={h}]"
+                    )
                 }
                 (OutputFormat::Mp4, None) => {
                     "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best".to_string()

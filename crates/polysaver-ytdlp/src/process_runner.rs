@@ -658,11 +658,11 @@ mod tests {
         // Wait until the grandchild pid has been recorded.
         let mut grandchild_pid = 0i32;
         for _ in 0..100 {
-            if let Ok(content) = tokio::fs::read_to_string(&pid_file).await {
-                if let Ok(pid) = content.trim().parse::<i32>() {
-                    grandchild_pid = pid;
-                    break;
-                }
+            if let Ok(content) = tokio::fs::read_to_string(&pid_file).await
+                && let Ok(pid) = content.trim().parse::<i32>()
+            {
+                grandchild_pid = pid;
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }

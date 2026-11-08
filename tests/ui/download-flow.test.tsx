@@ -664,6 +664,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       openSupportPage: vi.fn().mockResolvedValue(undefined),
       openContactEmail: vi.fn().mockResolvedValue(undefined),
       checkForUpdates: vi.fn().mockResolvedValue(null),
+      getReleaseNotes: vi.fn().mockResolvedValue({ name: null, body: null }),
       downloadAndInstallUpdate: vi.fn().mockResolvedValue(undefined),
       restartApp: vi.fn().mockResolvedValue(undefined),
       checkEngineUpdate: vi.fn().mockResolvedValue({
@@ -769,6 +770,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       openSupportPage: vi.fn().mockResolvedValue(undefined),
       openContactEmail: vi.fn().mockResolvedValue(undefined),
       checkForUpdates: vi.fn().mockResolvedValue(null),
+      getReleaseNotes: vi.fn().mockResolvedValue({ name: null, body: null }),
       downloadAndInstallUpdate: vi.fn().mockResolvedValue(undefined),
       restartApp: vi.fn().mockResolvedValue(undefined),
       checkEngineUpdate: vi.fn().mockResolvedValue({
@@ -871,6 +873,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       openSupportPage: vi.fn().mockResolvedValue(undefined),
       openContactEmail: vi.fn().mockResolvedValue(undefined),
       checkForUpdates: vi.fn().mockResolvedValue(null),
+      getReleaseNotes: vi.fn().mockResolvedValue({ name: null, body: null }),
       downloadAndInstallUpdate: vi.fn().mockResolvedValue(undefined),
       restartApp: vi.fn().mockResolvedValue(undefined),
       checkEngineUpdate: vi.fn().mockResolvedValue({

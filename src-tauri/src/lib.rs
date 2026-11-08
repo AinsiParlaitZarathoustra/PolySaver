@@ -176,6 +176,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::check_js_runtime,
             commands::install_js_runtime,
             commands::open_support_page,
+            commands::get_release_notes,
             commands::open_contact_email,
         ])
         .run(tauri::generate_context!())?;

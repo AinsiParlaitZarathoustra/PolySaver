@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 PolySaver contributors
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -12,11 +12,14 @@ import {
   Box,
   LinearProgress,
   Alert,
+  CircularProgress,
 } from '@mui/material';
 import SystemUpdateAltIcon from '@mui/icons-material/SystemUpdateAlt';
 import { useTranslation } from 'react-i18next';
 import type { IpcClient } from '../ipc/client';
 import type { UpdateInfo } from '../ipc/contracts';
+import { extractWhatsNew, type WhatsNew } from '../utils/releaseNotes';
+import { ReleaseNotes } from './ReleaseNotes';
 
 interface UpdatePromptDialogProps {
   open: boolean;
@@ -38,6 +41,35 @@ export const UpdatePromptDialog: React.FC<UpdatePromptDialogProps> = ({
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [isReadyToRestart, setIsReadyToRestart] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [releaseName, setReleaseName] = useState<string | null>(null);
+  const [whatsNew, setWhatsNew] = useState<WhatsNew | null>(null);
+  const [notesLoading, setNotesLoading] = useState(false);
+
+  const version = updateInfo?.version;
+
+  // The release page holds the full "what's new" text (the updater manifest
+  // only carries a one-line note). Without it, the dialog still works.
+  useEffect(() => {
+    if (!open || !version) return;
+    let active = true;
+    setNotesLoading(true);
+    client
+      .getReleaseNotes(version)
+      .then((notes) => {
+        if (!active) return;
+        setReleaseName(notes.name ?? null);
+        setWhatsNew(extractWhatsNew(notes.body));
+      })
+      .catch(() => {
+        if (active) setWhatsNew(null);
+      })
+      .finally(() => {
+        if (active) setNotesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open, version, client]);
 
   const handleInstall = useCallback(async () => {
     if (hasActiveDownloads) return;
@@ -72,11 +104,14 @@ export const UpdatePromptDialog: React.FC<UpdatePromptDialogProps> = ({
 
   if (!updateInfo) return null;
 
+  const title = whatsNew?.title || releaseName || `PolySaver ${updateInfo.version}`;
+  const hasNotes = Boolean(whatsNew && whatsNew.blocks.length > 0);
+
   return (
     <Dialog
       open={open}
       onClose={isDownloading ? undefined : onClose}
-      maxWidth="xs"
+      maxWidth="sm"
       fullWidth
       aria-labelledby="update-prompt-dialog-title"
       PaperProps={{
@@ -90,19 +125,29 @@ export const UpdatePromptDialog: React.FC<UpdatePromptDialogProps> = ({
         id="update-prompt-dialog-title"
         sx={{ display: 'flex', alignItems: 'center', gap: 1.5, pb: 1 }}
       >
-        <SystemUpdateAltIcon color="primary" />
+        <SystemUpdateAltIcon color="success" />
         <Typography variant="h6" component="h2" sx={{ fontWeight: 700 }}>
-          {t('help.updater.title')}
+          {title}
         </Typography>
       </DialogTitle>
 
       <DialogContent sx={{ pb: 1 }}>
-        <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
-          {t('help.updater.updateAvailable', { version: updateInfo.version })}
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          {t('help.updater.updateAvailablePrompt')}
-        </Typography>
+        {notesLoading ? (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, my: 2 }}>
+            <CircularProgress size={18} />
+            <Typography variant="body2" color="text.secondary">
+              {t('help.updater.notesLoading')}
+            </Typography>
+          </Box>
+        ) : hasNotes && whatsNew ? (
+          <Box sx={{ mb: 2 }}>
+            <ReleaseNotes blocks={whatsNew.blocks} />
+          </Box>
+        ) : (
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            {t('help.updater.updateAvailablePrompt')}
+          </Typography>
+        )}
 
         {hasActiveDownloads && !isReadyToRestart && (
           <Alert severity="warning" sx={{ mb: 2 }}>

@@ -256,7 +256,8 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Automatic non-blocking check for updates on startup
+  // Silent check on startup: an available update only shows the green button
+  // in the header, it never opens a dialog by itself.
   useEffect(() => {
     let isMounted = true;
     const checkUpdates = async () => {
@@ -264,7 +265,6 @@ export const App: React.FC = () => {
         const update = await defaultIpcClient.checkForUpdates();
         if (isMounted && update) {
           setAutoUpdateInfo(update);
-          setUpdatePromptOpen(true);
         }
       } catch {
         // Silent on startup network errors
@@ -548,6 +548,8 @@ export const App: React.FC = () => {
         <Header
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenHelp={() => setHelpOpen(true)}
+          updateVersion={autoUpdateInfo?.version}
+          onOpenUpdate={() => setUpdatePromptOpen(true)}
         />
 
         <Container maxWidth="md" sx={{ py: { xs: 3, sm: 4 }, flexGrow: 1 }}>
@@ -603,7 +605,7 @@ export const App: React.FC = () => {
           onError={handleComponentError}
         />
 
-        {/* Software Update Startup Prompt Dialog */}
+        {/* Software update dialog, opened from the header's green button */}
         <UpdatePromptDialog
           open={updatePromptOpen}
           onClose={() => setUpdatePromptOpen(false)}

@@ -18,6 +18,7 @@ export const fr: LocaleResource = {
     preferencesTooltip: 'Préférences',
     helpButtonAria: 'Aide et support',
     helpTooltip: 'Aide et support',
+    updateTooltip: 'Mise à jour disponible : PolySaver {{version}}',
   },
   form: {
     urlPlaceholder: 'Collez un lien ici',
@@ -208,6 +209,7 @@ export const fr: LocaleResource = {
       updateAvailable: 'Version {{version}} disponible',
       updateAvailablePrompt: 'Une nouvelle version de PolySaver est disponible. Souhaitez-vous l’installer maintenant ?',
       updateNow: 'Mettre à jour',
+      notesLoading: 'Chargement des nouveautés…',
       updateLater: 'Plus tard',
       downloadingUpdate: 'Téléchargement de la mise à jour...',
       activeDownloadsWarning: 'Un téléchargement de média est en cours. Veuillez le terminer ou l’annuler avant d’installer la mise à jour.',

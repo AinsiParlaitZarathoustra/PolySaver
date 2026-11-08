@@ -18,6 +18,7 @@ export interface TranslationSchema {
     preferencesTooltip: string;
     helpButtonAria: string;
     helpTooltip: string;
+    updateTooltip: string;
   };
   form: {
     urlPlaceholder: string;
@@ -205,6 +206,7 @@ export interface TranslationSchema {
       updateAvailable: string;
       updateAvailablePrompt: string;
       updateNow: string;
+      notesLoading: string;
       updateLater: string;
       downloadingUpdate: string;
       activeDownloadsWarning: string;

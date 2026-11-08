@@ -5,6 +5,7 @@ pub mod analyze;
 pub mod downloads;
 pub mod engine;
 pub mod health;
+pub mod release_notes;
 pub mod settings;
 pub mod support;
 
@@ -12,5 +13,6 @@ pub use analyze::*;
 pub use downloads::*;
 pub use engine::*;
 pub use health::*;
+pub use release_notes::*;
 pub use settings::*;
 pub use support::*;

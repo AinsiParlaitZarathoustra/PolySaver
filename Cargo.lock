@@ -2782,6 +2782,7 @@ dependencies = [
  "polysaver-ffmpeg",
  "polysaver-storage",
  "polysaver-ytdlp",
+ "reqwest",
  "serde",
  "serde_json",
  "tauri",

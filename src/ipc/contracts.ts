@@ -281,4 +281,10 @@ export interface UpdateInfo {
   date?: string;
 }
 
+/** Name and text of a published release, as written on GitHub. */
+export interface ReleaseNotesDto {
+  name?: string | null;
+  body?: string | null;
+}
+
 export type UpdateProgressCallback = (downloadedBytes: number, totalBytes: number | null) => void;

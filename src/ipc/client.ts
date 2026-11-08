@@ -19,6 +19,7 @@ import type {
   JsRuntimeStatusDto,
   PlaylistDetectionDto,
   ProbeResult,
+  ReleaseNotesDto,
   UpdateInfo,
   UpdateProgressCallback,
 } from './contracts';
@@ -125,6 +126,8 @@ export interface IpcClient {
   openSupportPage(): Promise<void>;
   openContactEmail(): Promise<void>;
   checkForUpdates(): Promise<UpdateInfo | null>;
+  /** Name and text of release `version`, fetched from the release page. */
+  getReleaseNotes(version: string): Promise<ReleaseNotesDto>;
   downloadAndInstallUpdate(onProgress?: UpdateProgressCallback): Promise<void>;
   restartApp(): Promise<void>;
   checkEngineUpdate(): Promise<EngineUpdateStatusDto>;
@@ -382,6 +385,14 @@ export class TauriIpcClient implements IpcClient {
       };
     } catch (err) {
       this.currentUpdate = null;
+      throw normalizeIpcError(err);
+    }
+  }
+
+  async getReleaseNotes(version: string): Promise<ReleaseNotesDto> {
+    try {
+      return await invoke<ReleaseNotesDto>('get_release_notes', { version });
+    } catch (err) {
       throw normalizeIpcError(err);
     }
   }

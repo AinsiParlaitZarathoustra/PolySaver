@@ -18,6 +18,7 @@ export const en: LocaleResource = {
     preferencesTooltip: 'Preferences',
     helpButtonAria: 'Help & Support',
     helpTooltip: 'Help & Support',
+    updateTooltip: 'Update available: PolySaver {{version}}',
   },
   form: {
     urlPlaceholder: 'Paste a link here',
@@ -208,6 +209,7 @@ export const en: LocaleResource = {
       updateAvailable: 'Version {{version}} available',
       updateAvailablePrompt: 'A new version of PolySaver is available. Would you like to install it now?',
       updateNow: 'Update',
+      notesLoading: 'Loading what’s new…',
       updateLater: 'Later',
       downloadingUpdate: 'Downloading update...',
       activeDownloadsWarning: 'A media download is in progress. Please finish or cancel it before installing the update.',

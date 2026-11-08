@@ -12,15 +12,24 @@ import {
 } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import { useTranslation } from 'react-i18next';
 import logoIcon from '../assets/polysaver-icon.png';
 
 interface HeaderProps {
   onOpenSettings: () => void;
   onOpenHelp: () => void;
+  /** Version of the available update; the update button only shows then. */
+  updateVersion?: string | null;
+  onOpenUpdate?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onOpenSettings, onOpenHelp }) => {
+export const Header: React.FC<HeaderProps> = ({
+  onOpenSettings,
+  onOpenHelp,
+  updateVersion,
+  onOpenUpdate,
+}) => {
   const { t } = useTranslation();
 
   return (
@@ -80,6 +89,22 @@ export const Header: React.FC<HeaderProps> = ({ onOpenSettings, onOpenHelp }) =>
         </Box>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          {updateVersion && onOpenUpdate && (
+            <Tooltip title={t('header.updateTooltip', { version: updateVersion })}>
+              <IconButton
+                onClick={onOpenUpdate}
+                aria-label={t('header.updateTooltip', { version: updateVersion })}
+                sx={{
+                  bgcolor: 'success.main',
+                  color: '#ffffff',
+                  '&:hover': { bgcolor: 'success.dark' },
+                }}
+              >
+                <ArrowDownwardIcon />
+              </IconButton>
+            </Tooltip>
+          )}
+
           <Tooltip title={t('header.helpTooltip')}>
             <IconButton
               onClick={onOpenHelp}

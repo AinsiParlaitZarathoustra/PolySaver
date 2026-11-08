@@ -8,27 +8,27 @@
 
 Téléchargeur vidéo et audio sans publicité ni abonnement et **rapide 🚀**
 
-[![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.6.0/PolySaver_2.6.0_macOS_arm64.dmg)
-[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.6.0/PolySaver_2.6.0_Windows_x64_Setup.exe)
-[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.6.0/PolySaver_2.6.0_Linux_x64.deb)
+[![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.7.0/PolySaver_2.7.0_macOS_arm64.dmg)
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.7.0/PolySaver_2.7.0_Windows_x64_Setup.exe)
+[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.7.0/PolySaver_2.7.0_Linux_x64.deb)
 [![Reddit](https://img.shields.io/badge/Reddit-r%2FPolySaver-FF4500?logo=reddit&logoColor=white)](https://www.reddit.com/r/PolySaver/)
 
-[**⬇ Télécharger pour macOS (ARM64)**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.6.0/PolySaver_2.6.0_macOS_arm64.dmg) · [**⬇ Télécharger pour Windows**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.6.0/PolySaver_2.6.0_Windows_x64_Setup.exe) · [**⬇ Télécharger pour Linux**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.6.0/PolySaver_2.6.0_Linux_x64.deb) · [**💬 Communauté Reddit**](https://www.reddit.com/r/PolySaver/)
+[**⬇ Télécharger pour macOS (ARM64)**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.7.0/PolySaver_2.7.0_macOS_arm64.dmg) · [**⬇ Télécharger pour Windows**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.7.0/PolySaver_2.7.0_Windows_x64_Setup.exe) · [**⬇ Télécharger pour Linux**](https://github.com/AinsiParlaitZarathoustra/PolySaver/releases/download/v2.7.0/PolySaver_2.7.0_Linux_x64.deb) · [**💬 Communauté Reddit**](https://www.reddit.com/r/PolySaver/)
 
 </div>
 
 ---
 
-## 🆕 Version 2.6.0
+## 🆕 Version 2.7.0
 
-La v2.6.0 se concentre sur Windows et sur la fraîcheur de l'application.
+La v2.7.0 rend les playlists vraiment pratiques et les téléchargements plus intelligents.
 
-- **Bug majeur corrigé sous Windows** : les fenêtres noires qui s'ouvraient pendant les téléchargements n'apparaissent plus
-- **Titres avec accents** : les vidéos dont le titre contient des accents (é, à, ç…) se téléchargent maintenant sans problème sous Windows
-- **Icône plus nette** : l'icône de PolySaver s'affiche en grand dans la barre des tâches, le menu Démarrer et sur le bureau
-- **Moteur à jour** : PolySaver embarque la dernière version de yt-dlp (26 octobre 2026) et ne revient jamais à une version plus ancienne
-- **Corrections de bugs** : l'installation du moteur JavaScript fonctionne maintenant sous Windows
-- **Sous le capot** : tous les composants ont été mis à jour pour plus de stabilité et de sécurité
+- **Playlists rangées** : chaque playlist a son propre dossier, avec les vidéos numérotées dans l'ordre
+- **Playlist en groupe** : dans la file, la playlist se replie en un seul bloc, avec la progression de chaque vidéo et la possibilité de relancer uniquement les échecs
+- **TikTok** : les liens de vidéos TikTok se téléchargent enfin
+- **Qualité intelligente** : si la qualité demandée n'existe pas, la plus proche est choisie au lieu d'une erreur, et c'est la qualité réellement téléchargée qui s'affiche
+- **Miniatures** : chaque téléchargement affiche sa miniature dans l'historique
+- **Mises à jour plus discrètes** : plus de fenêtre au lancement, un simple bouton vert apparaît quand une nouvelle version est disponible
 
 ---
 

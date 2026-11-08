@@ -126,7 +126,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     temp_dir,
                     polysaver_core::services::RetryPolicy::default(),
                 )
-                .with_engine_updater(Arc::clone(&engine_updater)),
+                .with_engine_updater(Arc::clone(&engine_updater))
+                // The engine, not the URL shape, decides what is a playlist.
+                .with_playlist_detector(ytdlp_downloader.clone()),
             );
 
             let state = AppState {
@@ -163,6 +165,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::list_download_history,
             commands::remove_download_history_entry,
             commands::reveal_history_file,
+            commands::get_history_thumbnail,
             commands::open_history_file,
             commands::open_history_source_url,
             commands::cancel_download,

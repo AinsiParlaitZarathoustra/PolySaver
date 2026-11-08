@@ -80,6 +80,17 @@ export const fr: LocaleResource = {
     errorDetailsComponent: 'Composant',
     errorDetailsExitCode: 'Code de sortie',
     playlistQueued: '{{count}} vidéos ajoutées à la file',
+    playlist: {
+      label: 'Playlist',
+      progress: '{{done}}/{{total}} téléchargées',
+      failedCount: '{{count}} en échec',
+      summary: '{{completed}} téléchargées, {{failed}} en échec',
+      retryFailed: 'Réessayer les échecs ({{count}})',
+      cancelAll: 'Tout annuler',
+      dismiss: 'Retirer la playlist de la file',
+      expandAria: 'Afficher les vidéos de la playlist',
+      collapseAria: 'Masquer les vidéos de la playlist',
+    },
   },
   history: {
     title: 'Historique',
@@ -130,10 +141,6 @@ export const fr: LocaleResource = {
       ready: 'Opérationnel',
       unavailable: 'Indisponible',
       refreshAria: 'Rafraîchir le diagnostic',
-    },
-    autosave: {
-      saving: 'Enregistrement des modifications...',
-      saved: 'Préférences sauvegardées',
     },
   },
   help: {

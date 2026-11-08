@@ -30,6 +30,15 @@ fn unique_suffix() -> String {
 const HISTORY_SCHEMA_VERSION: u32 = 1;
 const NDJSON_HISTORY_FILE_NAME: &str = "download_history.ndjson";
 const LEGACY_JSON_HISTORY_FILE_NAME: &str = "download_history.json";
+/// Directory (next to the journal) holding one `<entry id>.jpg` per entry.
+const THUMBNAILS_DIR_NAME: &str = "thumbnails";
+/// Previews are ~15 KB; anything far larger is not one of ours.
+const MAX_THUMBNAIL_BYTES: u64 = 512 * 1024;
+
+/// True when `bytes` starts with the JPEG SOI marker.
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+}
 const MAX_JOURNAL_SIZE_BYTES: u64 = 4 * 1024 * 1024; // 4 MB
 /// Maximum number of `.rejected_*` backup files kept next to the journal.
 const MAX_REJECTED_BACKUPS: usize = 5;
@@ -137,6 +146,29 @@ impl JsonDownloadHistoryRepository {
     #[must_use]
     pub fn history_file(&self) -> &Path {
         &self.ndjson_file
+    }
+
+    fn thumbnails_dir(&self) -> PathBuf {
+        self.config_dir.join(THUMBNAILS_DIR_NAME)
+    }
+
+    /// File name derived from the entry UUID, so it cannot escape the directory.
+    fn thumbnail_path(&self, id: HistoryEntryId) -> PathBuf {
+        self.thumbnails_dir().join(format!("{id}.jpg"))
+    }
+
+    /// Deletes thumbnails whose entry is no longer in `entries` (bulk save).
+    async fn prune_orphan_thumbnails(&self, entries: &[DownloadHistoryEntry]) {
+        let Ok(mut read_dir) = tokio::fs::read_dir(self.thumbnails_dir()).await else {
+            return;
+        };
+        let live: std::collections::HashSet<String> =
+            entries.iter().map(|e| format!("{}.jpg", e.id())).collect();
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            if !live.contains(entry.file_name().to_string_lossy().as_ref()) {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
     }
 
     /// Deletes the oldest `.rejected_*` backups, keeping at most [`MAX_REJECTED_BACKUPS`].
@@ -458,7 +490,9 @@ impl DownloadHistoryRepository for JsonDownloadHistoryRepository {
 
     async fn save(&self, entries: &[DownloadHistoryEntry]) -> Result<(), CoreError> {
         let _lock = self.write_lock.lock().await;
-        self.compact_internal(entries).await
+        self.compact_internal(entries).await?;
+        self.prune_orphan_thumbnails(entries).await;
+        Ok(())
     }
 
     async fn append(&self, entry: DownloadHistoryEntry) -> Result<(), CoreError> {
@@ -476,7 +510,49 @@ impl DownloadHistoryRepository for JsonDownloadHistoryRepository {
             v: HISTORY_SCHEMA_VERSION,
             id: id.to_string(),
         };
-        self.append_op(&op).await
+        self.append_op(&op).await?;
+        let _ = tokio::fs::remove_file(self.thumbnail_path(id)).await;
+        Ok(())
+    }
+
+    async fn save_thumbnail(&self, id: HistoryEntryId, image: &Path) -> Result<(), CoreError> {
+        let bytes = tokio::fs::read(image)
+            .await
+            .map_err(|err| CoreError::StorageError(format!("Failed to read thumbnail: {err}")))?;
+        if bytes.len() as u64 > MAX_THUMBNAIL_BYTES || !is_jpeg(&bytes) {
+            return Err(CoreError::StorageError(
+                "Thumbnail is not a JPEG preview".to_string(),
+            ));
+        }
+
+        let dir = self.thumbnails_dir();
+        tokio::fs::create_dir_all(&dir).await.map_err(|err| {
+            CoreError::StorageError(format!("Failed to create thumbnails dir: {err}"))
+        })?;
+        // Write then rename, so a reader never sees a half-written image.
+        let tmp = dir.join(format!(".{id}_{}.tmp", Uuid::new_v4().simple()));
+        if let Err(err) = tokio::fs::write(&tmp, &bytes).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(CoreError::StorageError(format!(
+                "Failed to write thumbnail: {err}"
+            )));
+        }
+        tokio::fs::rename(&tmp, self.thumbnail_path(id))
+            .await
+            .map_err(|err| {
+                let _ = std::fs::remove_file(&tmp);
+                CoreError::StorageError(format!("Failed to store thumbnail: {err}"))
+            })
+    }
+
+    async fn load_thumbnail(&self, id: HistoryEntryId) -> Option<Vec<u8>> {
+        let path = self.thumbnail_path(id);
+        let size = tokio::fs::metadata(&path).await.ok()?.len();
+        if size > MAX_THUMBNAIL_BYTES {
+            return None;
+        }
+        let bytes = tokio::fs::read(&path).await.ok()?;
+        is_jpeg(&bytes).then_some(bytes)
     }
 }
 
@@ -604,6 +680,59 @@ mod tests {
         let compacted = repo.load().await.unwrap();
         assert_eq!(compacted.len(), 1);
         assert_eq!(compacted[0].id(), entry2.id());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_thumbnails_follow_their_history_entry() {
+        let temp_dir = std::env::temp_dir().join(format!("thumb_test_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let repo = JsonDownloadHistoryRepository::new(&temp_dir);
+
+        let url = MediaUrl::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap();
+        let preset = DownloadPreset::video(OutputFormat::Mp4, VideoQuality::Best).unwrap();
+        let make_entry = |name: &str| {
+            DownloadHistoryEntry::new(
+                DownloadId::new(),
+                url.clone(),
+                name.to_string(),
+                preset,
+                abs_path(&format!("{name}.mp4")),
+                None,
+            )
+            .unwrap()
+        };
+        let kept = make_entry("kept");
+        let removed = make_entry("removed");
+        let dropped = make_entry("dropped");
+
+        let jpeg = temp_dir.join("preview.jpg");
+        tokio::fs::write(&jpeg, [0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3])
+            .await
+            .unwrap();
+        for entry in [&kept, &removed, &dropped] {
+            repo.append(entry.clone()).await.unwrap();
+            repo.save_thumbnail(entry.id(), &jpeg).await.unwrap();
+        }
+        assert_eq!(
+            repo.load_thumbnail(kept.id()).await.unwrap(),
+            vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]
+        );
+
+        // Anything that is not a JPEG is refused.
+        let png = temp_dir.join("preview.png");
+        tokio::fs::write(&png, b"\x89PNG\r\n").await.unwrap();
+        assert!(repo.save_thumbnail(kept.id(), &png).await.is_err());
+
+        // Removing an entry deletes its thumbnail.
+        repo.remove(removed.id()).await.unwrap();
+        assert!(repo.load_thumbnail(removed.id()).await.is_none());
+
+        // A bulk save prunes thumbnails of entries no longer listed.
+        repo.save(std::slice::from_ref(&kept)).await.unwrap();
+        assert!(repo.load_thumbnail(dropped.id()).await.is_none());
+        assert!(repo.load_thumbnail(kept.id()).await.is_some());
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

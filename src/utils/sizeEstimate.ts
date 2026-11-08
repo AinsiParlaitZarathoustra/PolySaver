@@ -9,7 +9,7 @@
  * usually a low-bitrate audio track, and could return wildly wrong values.
  */
 
-import type { FormatOption } from '../ipc/contracts';
+import type { FormatOption, Language } from '../ipc/contracts';
 
 /** Candidate quality level; `best` means "no height constraint". */
 export type SizeEstimateQuality = 'best' | number;
@@ -123,11 +123,16 @@ export function estimateDownloadSize(
  * Formats a byte count for display. Never prefixes with `~`: the UI shows the
  * estimate value alone.
  */
-export function formatBytes(bytes?: number | null): string {
+export function formatBytes(bytes?: number | null, language: Language = 'fr'): string {
   if (!bytes || bytes <= 0) return '';
+  const isEnglish = language === 'en';
   const mib = bytes / (1024 * 1024);
   if (mib >= 1024) {
-    return `${(mib / 1024).toFixed(1)} GB`;
+    const gib = (mib / 1024).toLocaleString(isEnglish ? 'en-GB' : 'fr-FR', {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    });
+    return `${gib} ${isEnglish ? 'GB' : 'Go'}`;
   }
-  return `${Math.round(mib)} MB`;
+  return `${Math.round(mib)} ${isEnglish ? 'MB' : 'Mo'}`;
 }

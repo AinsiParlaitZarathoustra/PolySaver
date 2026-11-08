@@ -71,6 +71,27 @@ impl VideoQuality {
         }
     }
 
+    /// Standard quality closest to a delivered resolution (its smallest
+    /// dimension, so a vertical 1080x1920 video is 1080p). Non-standard sizes
+    /// such as 1072 or 718 round to the nearest label; ties go to the lower one.
+    #[must_use]
+    pub fn closest_to_resolution(resolution: u32) -> Self {
+        const LADDER: [(u32, VideoQuality); 8] = [
+            (144, VideoQuality::P144),
+            (240, VideoQuality::P240),
+            (360, VideoQuality::P360),
+            (480, VideoQuality::P480),
+            (720, VideoQuality::P720),
+            (1080, VideoQuality::P1080),
+            (1440, VideoQuality::P1440),
+            (2160, VideoQuality::P2160),
+        ];
+        LADDER
+            .iter()
+            .min_by_key(|(height, _)| height.abs_diff(resolution))
+            .map_or(Self::Best, |(_, quality)| *quality)
+    }
+
     /// Target vertical height in pixels, or None for best available.
     #[must_use]
     pub const fn target_height(self) -> Option<u32> {

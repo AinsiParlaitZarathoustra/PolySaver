@@ -23,8 +23,29 @@ pub struct StartPlaylistDownloadRequestDto {
     pub url: String,
     pub preset: Option<DownloadPresetDto>,
     pub output_directory: Option<String>,
-    /// URLs of the entries the user checked. Each one is re-validated server-side.
-    pub selected_urls: Vec<String>,
+    /// Playlist title, used for the download subfolder and the queue group.
+    #[serde(default)]
+    pub playlist_title: String,
+    /// Entries the user checked. Each URL is re-validated server-side.
+    pub entries: Vec<PlaylistEntrySelectionDto>,
+}
+
+/// One checked playlist entry: its URL and 1-based position in the playlist.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistEntrySelectionDto {
+    pub url: String,
+    pub position: u32,
+}
+
+/// Playlist group a queued job belongs to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistGroupDto {
+    pub id: String,
+    pub title: String,
+    pub position: u32,
+    pub total: u32,
 }
 
 /// Request DTO for analyzing a media URL.
@@ -60,6 +81,9 @@ pub struct DownloadJobDto {
     pub error_details: Option<DownloadErrorDetails>,
     /// Number of automatic retries already performed for this job.
     pub retry_count: u32,
+    /// Playlist group, for videos queued from a playlist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playlist: Option<PlaylistGroupDto>,
 }
 
 impl From<&DownloadJob> for DownloadJobDto {
@@ -78,6 +102,12 @@ impl From<&DownloadJob> for DownloadJobDto {
             error_message: job.error_message().map(String::from),
             error_details: job.error_details().cloned(),
             retry_count: u32::from(job.retry_count()),
+            playlist: job.playlist().map(|p| PlaylistGroupDto {
+                id: p.group_id.to_string(),
+                title: p.title.clone(),
+                position: p.position,
+                total: p.total,
+            }),
         }
     }
 }

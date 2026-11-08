@@ -25,11 +25,12 @@ pub struct FormatOption {
 
 /// Maximum number of playlist entries enumerated for the selection list
 /// (`--playlist-end`). Channels can hold tens of thousands of videos, so the
-/// listing is always bounded.
-pub const PLAYLIST_ENTRIES_LIMIT: usize = 200;
+/// listing is always bounded. Kept at 100 so a single submission stays well
+/// below the volume that gets a client throttled by the video sites.
+pub const PLAYLIST_ENTRIES_LIMIT: usize = 100;
 
 /// Maximum number of entries accepted in a single playlist download request.
-pub const MAX_PLAYLIST_DOWNLOADS: usize = 200;
+pub const MAX_PLAYLIST_DOWNLOADS: usize = 100;
 
 /// Kind of media resolved by an analysis: a single item or a playlist/listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

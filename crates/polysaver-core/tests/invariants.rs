@@ -13,11 +13,12 @@ use polysaver_core::error::{CoreError, DownloadErrorDetails};
 use polysaver_core::ports::event_sink::EventSink;
 use polysaver_core::ports::history_repository::DownloadHistoryRepository;
 use polysaver_core::ports::media_inspector::{MediaInspector, MediaStreamInfo};
+use polysaver_core::ports::playlist_detector::{PlaylistDetection, PlaylistDetector};
 use polysaver_core::ports::{
     ConvertRequest, DownloadStreamRequest, DownloadedStreams, MediaConverter, MediaDownloader,
     SettingsRepository, StreamProgress,
 };
-use polysaver_core::services::{RetryPolicy, StartDownloadService};
+use polysaver_core::services::{PlaylistItemRequest, RetryPolicy, StartDownloadService};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -230,6 +231,23 @@ fn test_playlist_urls_are_classified_as_playlists() {
             "expected playlist for {raw}"
         );
     }
+
+    // A post under a handle is a single item, while the handle itself (a TikTok
+    // profile) is a listing.
+    for raw in [
+        "https://www.tiktok.com/@user/video/7581276453208149270",
+        "https://www.tiktok.com/@user/video/7581276453208149270?is_from_webapp=1",
+        "https://www.tiktok.com/@user/photo/7581276453208149270",
+    ] {
+        let url = MediaUrl::parse(raw).expect("post URL must be accepted");
+        assert_eq!(
+            url.kind(),
+            MediaUrlKind::Single,
+            "expected single for {raw}"
+        );
+    }
+    let profile = MediaUrl::parse("https://www.tiktok.com/@user").expect("profile URL");
+    assert_eq!(profile.kind(), MediaUrlKind::Playlist);
 
     // `list=` is a YouTube convention. Elsewhere it is an ordinary query parameter
     // (pagination, sorting, tracking) and must NOT switch the app into playlist
@@ -583,6 +601,8 @@ impl MediaDownloader for FakeDownloader {
             duration_seconds: Some(100),
             engine_outdated: false,
             cookies_diagnostic: None,
+            video_resolution: None,
+            thumbnail_path: None,
         })
     }
 }
@@ -1524,6 +1544,8 @@ impl MediaDownloader for BlockingFakeDownloader {
             duration_seconds: Some(100),
             engine_outdated: false,
             cookies_diagnostic: None,
+            video_resolution: None,
+            thumbnail_path: None,
         })
     }
 }
@@ -1698,6 +1720,8 @@ impl MediaDownloader for FlakyDownloader {
             duration_seconds: Some(10),
             engine_outdated: false,
             cookies_diagnostic: None,
+            video_resolution: None,
+            thumbnail_path: None,
         })
     }
 }
@@ -1930,6 +1954,8 @@ impl MediaDownloader for StaleEngineDownloader {
             duration_seconds: Some(5),
             engine_outdated: false,
             cookies_diagnostic: None,
+            video_resolution: None,
+            thumbnail_path: None,
         })
     }
 }
@@ -2163,13 +2189,31 @@ async fn batch_test_service(
     (service, history, dir)
 }
 
-fn playlist_entry_urls(count: usize) -> Vec<MediaUrl> {
+fn playlist_entry_urls(count: usize) -> Vec<PlaylistItemRequest> {
     (0..count)
-        .map(|i| {
-            MediaUrl::parse(&format!("https://www.youtube.com/watch?v=entry{i}"))
-                .expect("generated URL must be valid")
+        .map(|i| PlaylistItemRequest {
+            url: MediaUrl::parse(&format!("https://www.youtube.com/watch?v=entry{i}"))
+                .expect("generated URL must be valid"),
+            position: u32::try_from(i + 1).unwrap(),
         })
         .collect()
+}
+
+/// Detector answering a fixed verdict, or failing when `None`.
+struct FixedDetector(Option<bool>);
+
+#[async_trait]
+impl PlaylistDetector for FixedDetector {
+    async fn detect_playlist(
+        &self,
+        _url: &MediaUrl,
+        _token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<PlaylistDetection, CoreError> {
+        match self.0 {
+            Some(is_playlist) => Ok(PlaylistDetection { is_playlist }),
+            None => Err(CoreError::ProviderError("engine unreachable".to_string())),
+        }
+    }
 }
 
 #[tokio::test]
@@ -2177,14 +2221,14 @@ async fn test_start_download_batch_rejects_empty_and_oversized_selections() {
     let (service, _history, _dir) = batch_test_service(Arc::new(HangingDownloader)).await;
 
     let empty = service
-        .start_download_batch(Vec::new(), None, None)
+        .start_download_batch(Vec::new(), "Playlist", None, None)
         .await
         .expect_err("an empty selection must be refused");
     assert!(matches!(empty, CoreError::InvalidSettings(_)));
 
     let too_many = playlist_entry_urls(MAX_PLAYLIST_DOWNLOADS + 1);
     let refused = service
-        .start_download_batch(too_many, None, None)
+        .start_download_batch(too_many, "Playlist", None, None)
         .await
         .expect_err("more than the cap must be refused");
     assert!(matches!(refused, CoreError::InvalidSettings(_)));
@@ -2197,10 +2241,10 @@ async fn test_start_download_batch_rejects_empty_and_oversized_selections() {
 async fn test_start_download_batch_queues_one_independent_job_per_url() {
     let (service, history, _dir) = batch_test_service(Arc::new(HangingDownloader)).await;
     let urls = playlist_entry_urls(3);
-    let expected: Vec<String> = urls.iter().map(|u| u.as_str().to_string()).collect();
+    let expected: Vec<String> = urls.iter().map(|u| u.url.as_str().to_string()).collect();
 
     let jobs = service
-        .start_download_batch(urls, None, None)
+        .start_download_batch(urls, "Playlist", None, None)
         .await
         .expect("batch must be accepted");
     assert_eq!(jobs.len(), 3);
@@ -2234,6 +2278,160 @@ async fn test_start_download_batch_queues_one_independent_job_per_url() {
     // No video finished yet: history stays untouched.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(history.load().await.unwrap().is_empty());
+}
+
+#[test]
+fn test_delivered_resolution_maps_to_the_nearest_quality() {
+    use polysaver_core::domain::VideoQuality as Q;
+    assert_eq!(Q::closest_to_resolution(1080), Q::P1080);
+    assert_eq!(Q::closest_to_resolution(240), Q::P240);
+    // Non-standard sizes round to the nearest label.
+    assert_eq!(Q::closest_to_resolution(1072), Q::P1080);
+    assert_eq!(Q::closest_to_resolution(718), Q::P720);
+    assert_eq!(Q::closest_to_resolution(4320), Q::P2160);
+    assert_eq!(Q::closest_to_resolution(100), Q::P144);
+}
+
+/// Downloader that "falls back" to 1080p, as yt-dlp does for a 4K request on a
+/// video whose maximum is 1080p.
+struct FallbackTo1080Downloader;
+
+#[async_trait]
+impl MediaDownloader for FallbackTo1080Downloader {
+    async fn download_stream(
+        &self,
+        request: DownloadStreamRequest,
+        _cb: Arc<dyn Fn(StreamProgress) + Send + Sync>,
+    ) -> Result<DownloadedStreams, CoreError> {
+        let video_file = request.temp_dir.join("video.mp4");
+        tokio::fs::write(&video_file, b"fake video").await.unwrap();
+        Ok(DownloadedStreams {
+            raw_artifacts: vec![video_file.clone()],
+            video_path: Some(video_file),
+            audio_path: None,
+            title: "Michel Jonasz - Les fourmis rouges".to_string(),
+            duration_seconds: Some(240),
+            engine_outdated: false,
+            cookies_diagnostic: None,
+            video_resolution: Some(1080),
+            thumbnail_path: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_queue_and_history_show_the_quality_actually_delivered() {
+    let (service, history, _dir) = batch_test_service(Arc::new(FallbackTo1080Downloader)).await;
+    let job = service
+        .start_download(
+            "https://www.youtube.com/watch?v=x3f2-4h3AsM",
+            Some(DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P2160).unwrap()),
+            None,
+        )
+        .await
+        .unwrap();
+    wait_for_terminal(&service, job.id()).await;
+
+    let delivered = DownloadPreset::video(OutputFormat::Mp4, VideoQuality::P1080).unwrap();
+    let finished = service
+        .list_downloads()
+        .await
+        .into_iter()
+        .find(|j| j.id() == job.id())
+        .unwrap();
+    assert_eq!(finished.status(), DownloadStatus::Completed);
+    assert_eq!(
+        finished.preset(),
+        delivered,
+        "the queue shows 1080p, not 4K"
+    );
+    let entries = history.load().await.unwrap();
+    assert_eq!(
+        entries[0].preset(),
+        delivered,
+        "history shows 1080p, not 4K"
+    );
+}
+
+#[tokio::test]
+async fn test_playlist_videos_land_numbered_in_a_playlist_folder() {
+    let (service, _history, dir) = batch_test_service(Arc::new(FakeDownloader)).await;
+    let items = vec![
+        PlaylistItemRequest {
+            url: MediaUrl::parse("https://www.youtube.com/watch?v=third").unwrap(),
+            position: 3,
+        },
+        PlaylistItemRequest {
+            url: MediaUrl::parse("https://www.youtube.com/watch?v=twelfth").unwrap(),
+            position: 12,
+        },
+    ];
+
+    // The title comes from the site: it is sanitized like a file name.
+    let jobs = service
+        .start_download_batch(items, "Best of: 2026/27", None, None)
+        .await
+        .expect("batch must be accepted");
+
+    // One group shared by the whole submission, each video keeping its position.
+    let group = jobs[0].playlist().expect("playlist membership").group_id;
+    for (job, position) in jobs.iter().zip([3, 12]) {
+        let membership = job.playlist().expect("playlist membership");
+        assert_eq!(membership.group_id, group);
+        assert_eq!(membership.title, "Best of: 2026/27");
+        assert_eq!(membership.position, position);
+        assert_eq!(membership.total, 2);
+        wait_for_terminal(&service, job.id()).await;
+    }
+
+    let folder = dir.join("downloads").join("Best of_ 2026_27");
+    for name in ["03 - Test Video.mp4", "12 - Test Video.mp4"] {
+        assert!(
+            folder.join(name).is_file(),
+            "missing {name} in playlist folder"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_retrying_a_playlist_video_keeps_its_group() {
+    let (service, _history, _dir) = batch_test_service(Arc::new(PermanentFailureDownloader)).await;
+    let jobs = service
+        .start_download_batch(playlist_entry_urls(1), "Ma playlist", None, None)
+        .await
+        .unwrap();
+    wait_for_terminal(&service, jobs[0].id()).await;
+
+    let retried = service.retry_download(jobs[0].id()).await.unwrap();
+    assert_eq!(retried.playlist(), jobs[0].playlist());
+}
+
+#[tokio::test]
+async fn test_engine_decides_when_the_url_shape_looks_like_a_playlist() {
+    // The shape says "listing" for every URL below; the engine has the final word.
+    let shaped_like_listing = "https://www.youtube.com/@handle/videos";
+
+    let (service, _history, _dir) = batch_test_service(Arc::new(HangingDownloader)).await;
+    let service = service.with_playlist_detector(Arc::new(FixedDetector(Some(false))));
+    service
+        .start_download(shaped_like_listing, None, None)
+        .await
+        .expect("the engine says single video: the download must be accepted");
+
+    let (service, _history, _dir) = batch_test_service(Arc::new(HangingDownloader)).await;
+    let service = service.with_playlist_detector(Arc::new(FixedDetector(Some(true))));
+    let refused = service
+        .start_download(shaped_like_listing, None, None)
+        .await;
+    assert!(matches!(refused, Err(CoreError::InvalidState(_))));
+
+    // Engine unreachable: the shape wins, refusing rather than mixing videos.
+    let (service, _history, _dir) = batch_test_service(Arc::new(HangingDownloader)).await;
+    let service = service.with_playlist_detector(Arc::new(FixedDetector(None)));
+    let refused = service
+        .start_download(shaped_like_listing, None, None)
+        .await;
+    assert!(matches!(refused, Err(CoreError::InvalidState(_))));
 }
 
 #[tokio::test]

@@ -52,12 +52,17 @@ export const isPlaylistLikeUrl = (raw: string): boolean => {
   }
 
   const path = parsed.pathname.toLowerCase();
+  if (path.startsWith('/@')) {
+    // A post under a handle (`/@user/video/<id>` on TikTok) is a single item;
+    // the handle itself and its sub-pages are listings. Mirrors the Rust rule.
+    const [, kind, id] = path.slice(2).split('/');
+    return !((kind === 'video' || kind === 'photo') && Boolean(id));
+  }
   if (
     path.startsWith('/playlist') ||
     path.startsWith('/channel') ||
     path.startsWith('/c/') ||
-    path.startsWith('/user/') ||
-    path.startsWith('/@')
+    path.startsWith('/user/')
   ) {
     return true;
   }

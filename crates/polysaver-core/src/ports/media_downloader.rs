@@ -64,6 +64,11 @@ pub struct DownloadedStreams {
     pub engine_outdated: bool,
     /// Cookie-import outcome, when a browser was configured.
     pub cookies_diagnostic: Option<CookiesDiagnostic>,
+    /// Resolution actually downloaded (smallest dimension), for video.
+    pub video_resolution: Option<u32>,
+    /// Small JPEG preview of the media, when the provider exposes one.
+    /// Lives in the job temp directory: persist it before that is removed.
+    pub thumbnail_path: Option<PathBuf>,
 }
 
 use async_trait::async_trait;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 PolySaver contributors
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box,
   Card,
@@ -63,6 +63,23 @@ const DownloadHistoryCard: React.FC<{
   onError?: (message: string) => void;
 }> = ({ entry, onRemove, onError }) => {
   const { t } = useTranslation();
+  const [thumbnail, setThumbnail] = useState<string | null>(null);
+
+  // Local copy taken at download time; absent when the source exposed none.
+  useEffect(() => {
+    let active = true;
+    defaultIpcClient
+      .getHistoryThumbnail(entry.id)
+      .then((url) => {
+        if (active) setThumbnail(url);
+      })
+      .catch(() => {
+        // Decoration only: keep the format icon.
+      });
+    return () => {
+      active = false;
+    };
+  }, [entry.id]);
 
   const isVideo =
     entry.preset.format === 'mp4' || entry.preset.format === 'mov';
@@ -132,7 +149,22 @@ const DownloadHistoryCard: React.FC<{
             }}
           >
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flex: 1, minWidth: 0 }}>
-              {isVideo ? (
+              {thumbnail ? (
+                <Box
+                  component="img"
+                  src={thumbnail}
+                  alt=""
+                  onError={() => setThumbnail(null)}
+                  sx={{
+                    width: 64,
+                    height: 36,
+                    flexShrink: 0,
+                    objectFit: 'cover',
+                    borderRadius: 1.5,
+                    bgcolor: 'action.hover',
+                  }}
+                />
+              ) : isVideo ? (
                 <MovieIcon color="primary" />
               ) : (
                 <MusicNoteIcon color="secondary" />

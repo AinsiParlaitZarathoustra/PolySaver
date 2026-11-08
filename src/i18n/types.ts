@@ -79,6 +79,17 @@ export interface TranslationSchema {
     errorDetailsComponent: string;
     errorDetailsExitCode: string;
     playlistQueued: string;
+    playlist: {
+      label: string;
+      progress: string;
+      failedCount: string;
+      summary: string;
+      retryFailed: string;
+      cancelAll: string;
+      dismiss: string;
+      expandAria: string;
+      collapseAria: string;
+    };
   };
   history: {
     title: string;
@@ -127,10 +138,6 @@ export interface TranslationSchema {
       ready: string;
       unavailable: string;
       refreshAria: string;
-    };
-    autosave: {
-      saving: string;
-      saved: string;
     };
   };
   help: {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 PolySaver contributors
 
-use crate::domain::download_job::{DownloadId, DownloadJob, DownloadStatus};
+use crate::domain::download_job::{DownloadId, DownloadJob, DownloadStatus, PlaylistMembership};
 use crate::domain::format::DownloadPreset;
 use crate::domain::history::{DownloadHistoryEntry, HistoryEntryId};
 use crate::domain::media_url::MediaUrl;
@@ -12,6 +12,7 @@ use crate::ports::event_sink::{DownloadProgressEvent, EventSink, ProgressPhase};
 use crate::ports::history_repository::DownloadHistoryRepository;
 use crate::ports::media_downloader::{DownloadStreamRequest, MediaDownloader, StreamProgress};
 use crate::ports::media_inspector::MediaInspector;
+use crate::ports::playlist_detector::PlaylistDetector;
 use crate::ports::settings_repository::SettingsRepository;
 use crate::services::limiter::ConcurrencyLimiter;
 use crate::services::retry::RetryPolicy;
@@ -80,6 +81,7 @@ struct PipelineContext {
     event_sink: Option<Arc<dyn EventSink>>,
     publish_mutex: Arc<Mutex<()>>,
     cancel_token: CancellationToken,
+    playlist: Option<PlaylistMembership>,
 }
 
 /// Immutable description of a job attempt, cloned into a fresh [`PipelineContext`]
@@ -99,6 +101,7 @@ struct AttemptSpec {
     event_sink: Option<Arc<dyn EventSink>>,
     publish_mutex: Arc<Mutex<()>>,
     cancel_token: CancellationToken,
+    playlist: Option<PlaylistMembership>,
 }
 
 impl AttemptSpec {
@@ -117,6 +120,7 @@ impl AttemptSpec {
             event_sink: self.event_sink.clone(),
             publish_mutex: Arc::clone(&self.publish_mutex),
             cancel_token: self.cancel_token.clone(),
+            playlist: self.playlist.clone(),
         }
     }
 }
@@ -136,7 +140,19 @@ pub struct StartDownloadService {
     publish_mutex: Arc<Mutex<()>>,
     retry_policy: RetryPolicy,
     engine_updater: Option<Arc<dyn EngineUpdater>>,
+    playlist_detector: Option<Arc<dyn PlaylistDetector>>,
 }
+
+/// One playlist video to queue through [`StartDownloadService::start_download_batch`].
+#[derive(Debug, Clone)]
+pub struct PlaylistItemRequest {
+    pub url: MediaUrl,
+    /// 1-based position of the video in the playlist (used to number the file).
+    pub position: u32,
+}
+
+/// Upper bound on the engine confirmation asked before refusing a playlist URL.
+const PLAYLIST_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Port used to refresh the download engine after an `YtdlpUpdateRequired` failure.
 #[async_trait::async_trait]
@@ -197,6 +213,40 @@ impl StartDownloadService {
             publish_mutex: Arc::new(Mutex::new(())),
             retry_policy,
             engine_updater: None,
+            playlist_detector: None,
+        }
+    }
+
+    /// Injects the engine-backed detector that has the final word on whether an
+    /// URL is a playlist (see [`Self::start_download`]).
+    #[must_use]
+    pub fn with_playlist_detector(mut self, detector: Arc<dyn PlaylistDetector>) -> Self {
+        self.playlist_detector = Some(detector);
+        self
+    }
+
+    /// True when `url` must go through the playlist flow.
+    ///
+    /// The URL shape is only a cheap pre-filter: when it looks like a listing,
+    /// the engine (when available) decides, so a shape the heuristic gets wrong
+    /// never blocks a single video. If the engine cannot answer, the shape wins,
+    /// which errs on the safe side (refusing rather than mixing many videos into
+    /// one job).
+    async fn is_engine_confirmed_playlist(&self, url: &MediaUrl) -> bool {
+        if !url.is_playlist() {
+            return false;
+        }
+        let Some(detector) = self.playlist_detector.as_ref() else {
+            return true;
+        };
+        match tokio::time::timeout(
+            PLAYLIST_CONFIRM_TIMEOUT,
+            detector.detect_playlist(url, None),
+        )
+        .await
+        {
+            Ok(Ok(detection)) => detection.is_playlist,
+            _ => true,
         }
     }
 
@@ -209,7 +259,7 @@ impl StartDownloadService {
 
     /// Submits a download request, validates inputs, and launches background processing.
     ///
-    /// Playlist URLs are refused here: they must go through
+    /// Playlist URLs (as confirmed by the engine) are refused here: they must go through
     /// [`Self::start_download_batch`] so that each video becomes its own job with its
     /// own progress, cancellation, retry and history entry.
     pub async fn start_download(
@@ -219,7 +269,7 @@ impl StartDownloadService {
         custom_output_dir: Option<PathBuf>,
     ) -> Result<DownloadJob, CoreError> {
         let url = MediaUrl::parse(raw_url)?;
-        if url.is_playlist() {
+        if self.is_engine_confirmed_playlist(&url).await {
             return Err(CoreError::InvalidState(
                 "Cette URL est une playlist: utilisez le téléchargement de playlist.".to_string(),
             ));
@@ -236,37 +286,56 @@ impl StartDownloadService {
         Ok(self.enqueue_and_spawn(job, target_dir).await)
     }
 
-    /// Queues one job per selected playlist entry.
+    /// Queues one job per selected playlist entry, as one playlist group.
     ///
-    /// Every URL is re-parsed and re-validated here, so the frontend can never inject
-    /// an unchecked address. The concurrency limiter then runs them a few at a time
-    /// while each video keeps independent progress, cancellation, retry and history.
+    /// Every URL is re-parsed and re-validated by the caller, so the frontend can
+    /// never inject an unchecked address. The videos land in a subfolder named
+    /// after the playlist, numbered by their playlist position. The concurrency
+    /// limiter runs them a few at a time while each video keeps independent
+    /// progress, cancellation, retry and history.
     pub async fn start_download_batch(
         &self,
-        urls: Vec<MediaUrl>,
+        items: Vec<PlaylistItemRequest>,
+        playlist_title: &str,
         requested_preset: Option<DownloadPreset>,
         custom_output_dir: Option<PathBuf>,
     ) -> Result<Vec<DownloadJob>, CoreError> {
-        if urls.is_empty() {
+        if items.is_empty() {
             return Err(CoreError::InvalidSettings(
                 "Aucune vidéo sélectionnée.".to_string(),
             ));
         }
-        if urls.len() > MAX_PLAYLIST_DOWNLOADS {
+        if items.len() > MAX_PLAYLIST_DOWNLOADS {
             return Err(CoreError::InvalidSettings(format!(
                 "Trop de vidéos sélectionnées ({}). Maximum: {MAX_PLAYLIST_DOWNLOADS}.",
-                urls.len()
+                items.len()
             )));
         }
 
         let settings = self.settings_repo.load().await?;
         let preset = requested_preset.unwrap_or_else(|| settings.default_preset());
-        let target_dir = resolve_target_dir(&settings, custom_output_dir)?;
+        let title = match playlist_title.trim() {
+            "" => "Playlist",
+            trimmed => trimmed,
+        };
+        // Same sanitizing as file names: the title comes from the site.
+        let target_dir =
+            resolve_target_dir(&settings, custom_output_dir)?.join(sanitize_filename(title));
 
-        let mut jobs = Vec::with_capacity(urls.len());
-        for url in urls {
-            let mut job = DownloadJob::new(url, preset);
+        let group_id = uuid::Uuid::new_v4();
+        let total = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        let last_position = items.iter().map(|item| item.position).max().unwrap_or(1);
+        let mut jobs = Vec::with_capacity(items.len());
+        for item in items {
+            let mut job = DownloadJob::new(item.url, preset);
             job.set_target_dir(target_dir.clone());
+            job.set_playlist(PlaylistMembership {
+                group_id,
+                title: title.to_string(),
+                position: item.position,
+                total,
+                last_position,
+            });
             jobs.push(self.enqueue_and_spawn(job, target_dir.clone()).await);
         }
         Ok(jobs)
@@ -278,7 +347,7 @@ impl StartDownloadService {
     /// "terminal jobs never mutate" invariant is preserved and no `Failed -> Queued`
     /// transition is added to the domain.
     pub async fn retry_download(&self, job_id: DownloadId) -> Result<DownloadJob, CoreError> {
-        let (url, preset, stored_target_dir) = {
+        let (url, preset, stored_target_dir, playlist) = {
             let lock = self.active_jobs.lock().await;
             let job = lock.get(&job_id).ok_or(CoreError::JobNotFound(job_id))?;
             if job.status() != DownloadStatus::Failed {
@@ -291,6 +360,7 @@ impl StartDownloadService {
                 job.url().clone(),
                 job.preset(),
                 job.target_dir().map(PathBuf::from),
+                job.playlist().cloned(),
             )
         };
 
@@ -314,6 +384,9 @@ impl StartDownloadService {
 
         let mut job = DownloadJob::new(url, preset);
         job.set_target_dir(target_dir.clone());
+        if let Some(playlist) = playlist {
+            job.set_playlist(playlist);
+        }
 
         Ok(self.enqueue_and_spawn(job, target_dir).await)
     }
@@ -353,6 +426,7 @@ impl StartDownloadService {
             event_sink: self.event_sink.clone(),
             publish_mutex: Arc::clone(&self.publish_mutex),
             cancel_token: cancel_token.clone(),
+            playlist: job.playlist().cloned(),
         };
 
         let limiter = self.limiter.clone();
@@ -647,6 +721,11 @@ impl StartDownloadService {
 
         let path = PathBuf::from(entry.destination_path());
         ensure_path_within_download_dir(&path, &allowed_dir)
+    }
+
+    /// Returns the JPEG thumbnail recorded for a history entry, if any.
+    pub async fn get_history_thumbnail(&self, id: HistoryEntryId) -> Option<Vec<u8>> {
+        self.history_repo.load_thumbnail(id).await
     }
 
     /// Retrieves and validates the source URL of a history entry.
@@ -949,7 +1028,15 @@ impl StartDownloadService {
         }
 
         let ext = ctx.preset.format().extension();
-        let base_filename = sanitize_filename(&downloaded_streams.title);
+        // Playlist videos are numbered so the folder lists them in playlist order.
+        let base_filename = match ctx.playlist {
+            Some(ref playlist) => format!(
+                "{}{}",
+                playlist.file_prefix(),
+                sanitize_filename(&downloaded_streams.title)
+            ),
+            None => sanitize_filename(&downloaded_streams.title),
+        };
         let temp_output_file = job_temp_dir.join(format!("output_converted.{ext}"));
 
         let conversion_result = match ctx.preset {
@@ -1104,8 +1191,6 @@ impl StartDownloadService {
         )
         .await?;
 
-        let _ = tokio::fs::remove_dir_all(&job_temp_dir).await;
-
         // Step 6: Completed
         let final_path_str = destination_file.to_string_lossy().to_string();
         let completed_job = {
@@ -1114,6 +1199,11 @@ impl StartDownloadService {
                 if job.is_terminal() {
                     None
                 } else {
+                    if let Some(resolution) = downloaded_streams.video_resolution {
+                        job.record_delivered_quality(
+                            crate::domain::format::VideoQuality::closest_to_resolution(resolution),
+                        );
+                    }
                     job.transition_to_completed(final_path_str.clone())?;
                     Some(job.clone())
                 }
@@ -1128,24 +1218,38 @@ impl StartDownloadService {
                 ctx.job_id,
                 ctx.url,
                 downloaded_streams.title,
-                ctx.preset,
+                job.preset(),
                 final_path_str,
                 None,
                 ctx.target_dir.to_string_lossy().to_string(),
-            ) && let Err(err) = ctx.history_repo.append(history_entry).await
-                && let Some(ref sink) = ctx.event_sink
-            {
-                sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
-                    download_id: ctx.job_id,
-                    code: "HISTORY_SAVE_FAILED".to_string(),
-                    message: format!("Failed to record download history: {err}"),
-                });
+            ) {
+                let entry_id = history_entry.id();
+                match ctx.history_repo.append(history_entry).await {
+                    // The thumbnail is decoration: losing it never fails the job.
+                    Ok(()) => {
+                        if let Some(ref thumbnail) = downloaded_streams.thumbnail_path {
+                            let _ = ctx.history_repo.save_thumbnail(entry_id, thumbnail).await;
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(ref sink) = ctx.event_sink {
+                            sink.emit_warning(&crate::ports::event_sink::DownloadWarningEvent {
+                                download_id: ctx.job_id,
+                                code: "HISTORY_SAVE_FAILED".to_string(),
+                                message: format!("Failed to record download history: {err}"),
+                            });
+                        }
+                    }
+                }
             }
 
             if let Some(ref sink) = ctx.event_sink {
                 sink.emit_completed(job);
             }
         }
+
+        // Removed only now: the thumbnail is read from it when recording history.
+        let _ = tokio::fs::remove_dir_all(&job_temp_dir).await;
 
         Ok(())
     }

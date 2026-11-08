@@ -206,6 +206,25 @@ export interface DownloadJobDto {
   errorDetails?: DownloadErrorDetails | null;
   /** Number of automatic retries already performed for this job. */
   retryCount?: number;
+  /** Playlist group, for videos queued from a playlist. */
+  playlist?: PlaylistGroupDto | null;
+}
+
+/** Playlist a queued video belongs to; shared by the whole submission. */
+export interface PlaylistGroupDto {
+  id: string;
+  title: string;
+  /** 1-based position of the video in the playlist. */
+  position: number;
+  /** Number of videos queued for this playlist. */
+  total: number;
+}
+
+/** One checked playlist entry sent for download. */
+export interface PlaylistEntrySelection {
+  url: string;
+  /** 1-based position in the playlist, used to number the file. */
+  position: number;
 }
 
 export interface DownloadHistoryEntryDto {

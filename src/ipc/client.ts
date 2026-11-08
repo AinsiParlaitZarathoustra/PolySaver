@@ -11,6 +11,7 @@ import type {
   DownloadErrorDetails,
   DownloadHistoryEntryDto,
   DownloadJobDto,
+  PlaylistEntrySelection,
   DownloadPresetDto,
   EngineUpdateResultDto,
   EngineUpdateStatusDto,
@@ -103,7 +104,8 @@ export interface IpcClient {
     url: string,
     preset: DownloadPresetDto | undefined,
     outputDirectory: string | undefined,
-    selectedUrls: string[],
+    entries: PlaylistEntrySelection[],
+    playlistTitle: string,
   ): Promise<DownloadJobDto[]>;
   listDownloads(): Promise<DownloadJobDto[]>;
   cancelDownload(downloadId: string): Promise<DownloadJobDto>;
@@ -118,6 +120,8 @@ export interface IpcClient {
   revealHistoryFile(historyId: string): Promise<void>;
   openHistoryFile(historyId: string): Promise<void>;
   openHistorySourceUrl(historyId: string): Promise<void>;
+  /** Locally stored thumbnail as a `data:image/jpeg` URL, or null when none. */
+  getHistoryThumbnail(historyId: string): Promise<string | null>;
   openSupportPage(): Promise<void>;
   openContactEmail(): Promise<void>;
   checkForUpdates(): Promise<UpdateInfo | null>;
@@ -207,11 +211,12 @@ export class TauriIpcClient implements IpcClient {
     url: string,
     preset: DownloadPresetDto | undefined,
     outputDirectory: string | undefined,
-    selectedUrls: string[],
+    entries: PlaylistEntrySelection[],
+    playlistTitle: string,
   ): Promise<DownloadJobDto[]> {
     try {
       return await invoke<DownloadJobDto[]>('start_playlist_download', {
-        request: { url, preset, outputDirectory, selectedUrls },
+        request: { url, preset, outputDirectory, entries, playlistTitle },
       });
     } catch (err) {
       throw normalizeIpcError(err);
@@ -330,6 +335,14 @@ export class TauriIpcClient implements IpcClient {
   async openHistorySourceUrl(historyId: string): Promise<void> {
     try {
       await invoke('open_history_source_url', { historyId });
+    } catch (err) {
+      throw normalizeIpcError(err);
+    }
+  }
+
+  async getHistoryThumbnail(historyId: string): Promise<string | null> {
+    try {
+      return await invoke<string | null>('get_history_thumbnail', { historyId });
     } catch (err) {
       throw normalizeIpcError(err);
     }

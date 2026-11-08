@@ -93,7 +93,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       },
     ],
     playlistTotal: 3,
-    entriesLimit: 200,
+    entriesLimit: 100,
   };
 
   // 1. formatTransferRate utility (FR and EN)
@@ -442,7 +442,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
         <DownloadOptionsDialog
           open={true}
           onClose={vi.fn()}
-          probeResult={{ ...samplePlaylistProbe, playlistTotal: 12000, entriesLimit: 200 }}
+          probeResult={{ ...samplePlaylistProbe, playlistTotal: 12000, entriesLimit: 100 }}
           isLoading={false}
           defaultPreset={defaultPreset}
           onConfirmDownload={vi.fn().mockResolvedValue(undefined)}
@@ -450,7 +450,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       </ThemeProvider>,
     );
 
-    expect(screen.getByText('Affichage des 200 premières vidéos')).toBeInTheDocument();
+    expect(screen.getByText('Affichage des 100 premières vidéos')).toBeInTheDocument();
     // A flat enumeration carries no formats: no size estimate can be shown.
     expect(screen.queryByText(/Mo$/)).not.toBeInTheDocument();
   });
@@ -546,6 +546,42 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
     openUrlSpy.mockRestore();
   });
 
+  // 8b. History rows show the stored thumbnail, or the format icon without one
+  it('shows the history thumbnail when one was stored and the format icon otherwise', async () => {
+    const thumbnailUrl = 'data:image/jpeg;base64,/9j/4AAQ';
+    const thumbSpy = vi
+      .spyOn(defaultIpcClient, 'getHistoryThumbnail')
+      .mockImplementation(async (id) => (id === 'with-thumb' ? thumbnailUrl : null));
+    const entry = (id: string, title: string): DownloadHistoryEntryDto => ({
+      id,
+      downloadId: `job-${id}`,
+      sourceUrl: `https://www.youtube.com/watch?v=${id}`,
+      title,
+      preset: { format: 'mp4', videoQuality: 'best' },
+      destinationPath: `/downloads/${id}.mp4`,
+      completedAt: 1770000000000,
+    });
+
+    const { container } = render(
+      <ThemeProvider theme={createAppTheme('light')}>
+        <DownloadHistory
+          entries={[entry('with-thumb', 'Avec miniature'), entry('no-thumb', 'Sans miniature')]}
+          onRemoveEntry={vi.fn()}
+        />
+      </ThemeProvider>,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector(`img[src="${thumbnailUrl}"]`)).toBeInTheDocument();
+    });
+    expect(container.querySelectorAll('img')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-testid="MovieIcon"]')).toHaveLength(1);
+    expect(thumbSpy).toHaveBeenCalledWith('with-thumb');
+    expect(thumbSpy).toHaveBeenCalledWith('no-thumb');
+
+    thumbSpy.mockRestore();
+  });
+
   // 9. SettingsDrawer with Language selector and Parcourir button
   it('renders SettingsDrawer with Language selector and Parcourir button', async () => {
     const user = userEvent.setup();
@@ -560,7 +596,6 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
           onClose={vi.fn()}
           settings={defaultSettings}
           onUpdateSettings={handleUpdateSettings}
-          saveStatus="idle"
           onBrowseDirectory={handleBrowseDirectory}
         />
       </ThemeProvider>,
@@ -625,6 +660,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       revealHistoryFile: vi.fn(),
       openHistoryFile: vi.fn(),
       openHistorySourceUrl: vi.fn(),
+      getHistoryThumbnail: vi.fn().mockResolvedValue(null),
       openSupportPage: vi.fn().mockResolvedValue(undefined),
       openContactEmail: vi.fn().mockResolvedValue(undefined),
       checkForUpdates: vi.fn().mockResolvedValue(null),
@@ -729,6 +765,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       revealHistoryFile: vi.fn(),
       openHistoryFile: vi.fn(),
       openHistorySourceUrl: vi.fn(),
+      getHistoryThumbnail: vi.fn().mockResolvedValue(null),
       openSupportPage: vi.fn().mockResolvedValue(undefined),
       openContactEmail: vi.fn().mockResolvedValue(undefined),
       checkForUpdates: vi.fn().mockResolvedValue(null),
@@ -830,6 +867,7 @@ describe('Sprint 7 Persistent History, Location Chooser, and UI Polish', () => {
       revealHistoryFile: vi.fn(),
       openHistoryFile: vi.fn(),
       openHistorySourceUrl: vi.fn(),
+      getHistoryThumbnail: vi.fn().mockResolvedValue(null),
       openSupportPage: vi.fn().mockResolvedValue(undefined),
       openContactEmail: vi.fn().mockResolvedValue(undefined),
       checkForUpdates: vi.fn().mockResolvedValue(null),

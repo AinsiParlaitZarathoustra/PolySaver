@@ -35,6 +35,9 @@ pub struct EarlyMediaMetadata {
     pub duration_seconds: Option<u64>,
     pub format_ids: Vec<String>,
     pub stream_sizes: Vec<Option<u64>>,
+    /// Size of the selected video, as reported before download.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 /// Result of a successful yt-dlp process run.
@@ -357,6 +360,10 @@ pub fn parse_polysaver_meta_line(line: &str) -> Option<EarlyMediaMetadata> {
             {
                 meta.duration_seconds = Some(d.round() as u64);
             }
+        } else if let Some(val) = trimmed.strip_prefix("height:") {
+            meta.height = val.trim().parse::<u32>().ok().filter(|h| *h > 0);
+        } else if let Some(val) = trimmed.strip_prefix("width:") {
+            meta.width = val.trim().parse::<u32>().ok().filter(|w| *w > 0);
         } else if let Some(val) = trimmed.strip_prefix("fallback_id:") {
             let clean = val.trim();
             if !clean.is_empty() && clean != "NA" && clean != "None" {
@@ -575,6 +582,18 @@ mod tests {
         assert_eq!(meta.duration_seconds, Some(596));
         assert_eq!(meta.format_ids, vec!["137".to_string(), "140".to_string()]);
         assert_eq!(meta.stream_sizes, vec![Some(50000000), Some(5000000)]);
+    }
+
+    #[test]
+    fn test_parse_polysaver_meta_line_reads_the_selected_resolution() {
+        let line = "[POLYSAVER_META] title:Clip\tduration:60\tf0:137|1\tf1:140|2\tfallback_id:137+140\tfallback_size:3\twidth:1920\theight:1080";
+        let meta = parse_polysaver_meta_line(line).unwrap();
+        assert_eq!((meta.width, meta.height), (Some(1920), Some(1080)));
+
+        // Audio-only selection: yt-dlp prints NA, which is no resolution.
+        let audio = "[POLYSAVER_META] title:Audio\tduration:60\tf0:NA|NA\tfallback_id:140\tfallback_size:3\twidth:NA\theight:NA";
+        let meta = parse_polysaver_meta_line(audio).unwrap();
+        assert_eq!((meta.width, meta.height), (None, None));
     }
 
     #[test]

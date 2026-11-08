@@ -36,7 +36,7 @@ use tokio::sync::RwLock;
 /// `requested_formats.N` only exists when the selector merged ≥ 2 formats; for
 /// single-file selections (audio presets, muxed `best`) the entries are `NA` and
 /// the `fallback_*` tokens are used instead.
-const META_PRINT_TEMPLATE: &str = "before_dl:[POLYSAVER_META] title:%(title)s\tduration:%(duration)s\tf0:%(requested_formats.0.format_id)s|%(requested_formats.0.filesize,filesize_approx)s\tf1:%(requested_formats.1.format_id)s|%(requested_formats.1.filesize,filesize_approx)s\tf2:%(requested_formats.2.format_id)s|%(requested_formats.2.filesize,filesize_approx)s\tfallback_id:%(format_id)s\tfallback_size:%(filesize,filesize_approx)s";
+const META_PRINT_TEMPLATE: &str = "before_dl:[POLYSAVER_META] title:%(title)s\tduration:%(duration)s\tf0:%(requested_formats.0.format_id)s|%(requested_formats.0.filesize,filesize_approx)s\tf1:%(requested_formats.1.format_id)s|%(requested_formats.1.filesize,filesize_approx)s\tf2:%(requested_formats.2.format_id)s|%(requested_formats.2.filesize,filesize_approx)s\tfallback_id:%(format_id)s\tfallback_size:%(filesize,filesize_approx)s\twidth:%(width)s\theight:%(height)s";
 
 /// Progress template. Uses `%(info.format_id)s` (the reliable stream boundary
 /// marker) and numeric fields only; the percentage is computed downstream.
@@ -112,18 +112,25 @@ fn is_unavailable_title(title: &str) -> bool {
 
 /// Builds a playlist entry from one raw flat-playlist JSON object.
 ///
-/// In flat mode `webpage_url` is absent at entry level; `url` already holds a full
-/// watch URL on YouTube. When it does not (other extractors), the `id` is used to
-/// rebuild a canonical YouTube watch URL. Entries with neither are dropped by the
-/// caller. `availability` is always `null` in flat mode, so unplayable entries are
-/// detected from their bracketed placeholder title instead.
+/// The URL is the one the engine reports for the entry (`url`, else
+/// `webpage_url`). Only a YouTube entry without either gets its canonical watch
+/// URL rebuilt from its `id`: rebuilding a YouTube URL for another site's entry
+/// would download an unrelated video (or nothing). Entries left without a usable
+/// URL are dropped by the caller. `availability` is always `null` in flat mode,
+/// so unplayable entries are detected from their bracketed placeholder title.
 fn playlist_entry_from_json(entry: &serde_json::Value, index: usize) -> Option<PlaylistEntry> {
+    let is_youtube_entry = entry["ie_key"]
+        .as_str()
+        .or_else(|| entry["extractor_key"].as_str())
+        .is_some_and(|key| key.eq_ignore_ascii_case("youtube"));
     let url = entry["url"]
         .as_str()
+        .or_else(|| entry["webpage_url"].as_str())
         .map(String::from)
         .or_else(|| {
-            entry["id"]
-                .as_str()
+            is_youtube_entry
+                .then(|| entry["id"].as_str())
+                .flatten()
                 .map(|id| format!("https://www.youtube.com/watch?v={id}"))
         })
         .and_then(|raw| MediaUrl::parse(&raw).ok())?;
@@ -185,10 +192,12 @@ fn playlist_probe_result(url: &MediaUrl, parsed: &serde_json::Value) -> ProbeRes
 
 /// Builds the `--dump-single-json` argument list for a probe.
 ///
-/// Playlist URLs get `--flat-playlist` (lists entries without extracting each
-/// video: seconds instead of minutes) plus `--playlist-end`. `--lazy-playlist` is
-/// never passed: it would return a partial listing instead of the full, ordered
-/// set of entries the selection UI needs.
+/// `--flat-playlist` (lists entries without extracting each video: seconds
+/// instead of minutes) and `--playlist-end` are always passed: they have no
+/// effect on a single video, and the URL shape must not decide whether a
+/// listing gets bounded. The engine's `_type` then tells what the URL is.
+/// `--lazy-playlist` is never passed: it would return a partial listing instead
+/// of the full, ordered set of entries the selection UI needs.
 fn build_probe_args(
     url: &MediaUrl,
     cookies: Option<CookiesBrowser>,
@@ -197,17 +206,15 @@ fn build_probe_args(
     let mut args = vec![
         "--dump-single-json".to_string(),
         "--no-warnings".to_string(),
-    ];
-    if url.is_playlist() {
-        args.push("--flat-playlist".to_string());
-        args.push("--playlist-end".to_string());
-        args.push(PLAYLIST_ENTRIES_LIMIT.to_string());
+        "--flat-playlist".to_string(),
+        "--playlist-end".to_string(),
+        PLAYLIST_ENTRIES_LIMIT.to_string(),
         // A long listing pages through the extractor; keep the network bounded.
-        args.push("--socket-timeout".to_string());
-        args.push("30".to_string());
-        args.push("--extractor-retries".to_string());
-        args.push("2".to_string());
-    }
+        "--socket-timeout".to_string(),
+        "30".to_string(),
+        "--extractor-retries".to_string(),
+        "2".to_string(),
+    ];
     push_cookies_from_browser_arg(&mut args, cookies);
     push_js_runtime_arg(&mut args, js_runtime);
     args.push(url.as_str().to_string());
@@ -428,7 +435,9 @@ impl MediaProvider for YtDlpDownloader {
                 ),
             ));
         }
-        if url.is_playlist() || parsed["_type"].as_str() == Some("playlist") {
+        // The engine's answer, never the URL shape: a TikTok post under
+        // `/@user/...` is a video, an album on an unknown site is a playlist.
+        if parse_playlist_detection(&parsed)?.is_playlist {
             return Ok(playlist_probe_result(url, &parsed));
         }
 
@@ -550,30 +559,22 @@ impl MediaDownloader for YtDlpDownloader {
         let ffmpeg_bin = self.resolver.resolve_ffmpeg().await.ok().map(|r| r.path);
 
         // 1. Determine format selector based on preset
-        let format_selector = match request.preset {
-            DownloadPreset::Video { format, quality } => match (format, quality.target_height()) {
-                (OutputFormat::Mp4, Some(h)) => {
-                    format!(
-                        "bestvideo[height={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height={h}]+bestaudio/best[height={h}]"
-                    )
-                }
-                (OutputFormat::Mp4, None) => {
-                    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best".to_string()
-                }
-                (OutputFormat::Mov, Some(h)) => {
-                    format!("bestvideo[height={h}]+bestaudio/best[height={h}]")
-                }
-                (OutputFormat::Mov, None) => "bestvideo+bestaudio/best".to_string(),
-                _ => "bestvideo+bestaudio/best".to_string(),
-            },
-            DownloadPreset::Mp3 { .. } | DownloadPreset::Flac => "bestaudio/best".to_string(),
-        };
+        let (format_selector, target_resolution) = video_format_selection(request.preset);
 
         // 2. Direct single execution download with before_dl metadata printing and multi-stream progress template
         let out_template = request.temp_dir.join("stream.%(ext)s");
-        let mut download_args = vec![
-            "-f".to_string(),
-            format_selector,
+        // Own subdirectory, so a thumbnail is never mistaken for a media output.
+        let thumb_dir = request.temp_dir.join(THUMBNAIL_SUBDIR);
+        let thumb_template = thumb_dir.join("source.%(ext)s");
+        let mut download_args = vec!["-f".to_string(), format_selector];
+        if let Some(resolution) = target_resolution {
+            // Closest quality instead of a hard failure: the highest resolution
+            // not above the target, else the lowest one above it (4K asked on
+            // a 1080p video gives 1080p; 144p missing gives 240p).
+            download_args.push("--format-sort".to_string());
+            download_args.push(format!("res:{resolution}"));
+        }
+        download_args.extend([
             "--output".to_string(),
             out_template.to_string_lossy().to_string(),
             "--newline".to_string(),
@@ -584,7 +585,16 @@ impl MediaDownloader for YtDlpDownloader {
             PROGRESS_TEMPLATE.to_string(),
             "--print".to_string(),
             "after_move:[POLYSAVER_OUTPUT] %(filepath)s".to_string(),
-        ];
+            // One job, one video: if an URL still resolves to a listing (a
+            // shape the detection missed), take its first item rather than
+            // writing many videos over the same output name.
+            "--playlist-items".to_string(),
+            "1".to_string(),
+            // A missing or failed thumbnail is only a warning for yt-dlp.
+            "--write-thumbnail".to_string(),
+            "--output".to_string(),
+            format!("thumbnail:{}", thumb_template.to_string_lossy()),
+        ]);
 
         push_cookies_from_browser_arg(&mut download_args, self.cookies_from_browser().await);
         push_js_runtime_arg(&mut download_args, self.js_runtime().await.as_ref());
@@ -645,6 +655,22 @@ impl MediaDownloader for YtDlpDownloader {
             }
         };
 
+        let thumbnail_path = make_preview_thumbnail(ffmpeg_bin.as_deref(), &thumb_dir).await;
+        // Smallest dimension, so a vertical 1080x1920 video reads as 1080p.
+        let video_resolution = match request.preset {
+            DownloadPreset::Video { .. } => {
+                run_result
+                    .early_meta
+                    .as_ref()
+                    .and_then(|m| match (m.width, m.height) {
+                        (Some(w), Some(h)) => Some(w.min(h)),
+                        (None, height) => height,
+                        (width, None) => width,
+                    })
+            }
+            _ => None,
+        };
+
         Ok(DownloadedStreams {
             raw_artifacts: downloaded_files,
             video_path,
@@ -653,8 +679,79 @@ impl MediaDownloader for YtDlpDownloader {
             duration_seconds,
             engine_outdated: run_result.engine_outdated,
             cookies_diagnostic: run_result.cookies_diagnostic,
+            video_resolution,
+            thumbnail_path,
         })
     }
+}
+
+/// yt-dlp `-f` selector for a preset, plus the resolution to aim at.
+///
+/// A precise quality never hard-filters on height (`[height=1080]` fails when
+/// the video has no such stream): it is expressed as a sort target, applied
+/// through `--format-sort res:N`, so the closest available quality is taken.
+/// MP4 still prefers MP4/M4A streams so no re-encoding is needed.
+fn video_format_selection(preset: DownloadPreset) -> (String, Option<u32>) {
+    match preset {
+        DownloadPreset::Video { format, quality } => {
+            let selector = match format {
+                OutputFormat::Mp4 => "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+                _ => "bv*+ba/b",
+            };
+            (selector.to_string(), quality.target_height())
+        }
+        DownloadPreset::Mp3 { .. } | DownloadPreset::Flac => ("bestaudio/best".to_string(), None),
+    }
+}
+
+/// Subdirectory of the job temp dir receiving the thumbnail written by yt-dlp.
+const THUMBNAIL_SUBDIR: &str = "thumbnail";
+
+/// Upper bound for the thumbnail conversion; it normally takes milliseconds.
+const THUMBNAIL_CONVERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Converts the thumbnail yt-dlp wrote into `thumb_dir` (webp, jpg or png) into
+/// a small JPEG preview (at most 320 px wide, ~15 KB) for the history list.
+///
+/// Done here rather than with yt-dlp's `--convert-thumbnails`, whose failure
+/// would fail the whole download. Best effort: `None` only means the history
+/// shows the generic icon.
+async fn make_preview_thumbnail(ffmpeg_bin: Option<&Path>, thumb_dir: &Path) -> Option<PathBuf> {
+    let ffmpeg_bin = ffmpeg_bin?;
+    let mut read_dir = tokio::fs::read_dir(thumb_dir).await.ok()?;
+    let mut source = None;
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let path = entry.path();
+        if path.file_stem().is_some_and(|stem| stem == "source") && path.is_file() {
+            source = Some(path);
+            break;
+        }
+    }
+    let source = source?;
+    let preview = thumb_dir.join("preview.jpg");
+
+    let mut cmd = polysaver_binres::background_command(ffmpeg_bin);
+    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&source)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(320,iw)':-2",
+            "-q:v",
+            "4",
+        ])
+        .arg(&preview)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+
+    let status = tokio::time::timeout(THUMBNAIL_CONVERSION_TIMEOUT, cmd.status())
+        .await
+        .ok()?
+        .ok()?;
+    (status.success() && preview.is_file()).then_some(preview)
 }
 
 /// Helper function to parse human progress line for backward compatibility in unit tests.
@@ -819,11 +916,55 @@ mod tests {
     }
 
     #[test]
-    fn test_probe_args_enable_flat_playlist_only_for_listings() {
+    fn test_precise_quality_is_a_sort_target_never_a_hard_filter() {
+        // A hard `[height=N]` filter is what made "Requested format is not
+        // available" fail the download when the video lacks that height.
+        let (selector, target) = video_format_selection(
+            DownloadPreset::video(
+                OutputFormat::Mp4,
+                polysaver_core::domain::VideoQuality::P2160,
+            )
+            .unwrap(),
+        );
+        assert!(
+            !selector.contains("height="),
+            "selector must not filter: {selector}"
+        );
+        assert!(selector.starts_with("bv*[ext=mp4]+ba[ext=m4a]"));
+        assert_eq!(target, Some(2160));
+
+        let (selector, target) = video_format_selection(
+            DownloadPreset::video(
+                OutputFormat::Mov,
+                polysaver_core::domain::VideoQuality::P144,
+            )
+            .unwrap(),
+        );
+        assert!(!selector.contains("height="));
+        assert_eq!(target, Some(144));
+
+        // "Best" and audio presets have no target.
+        let (_, target) = video_format_selection(
+            DownloadPreset::video(
+                OutputFormat::Mp4,
+                polysaver_core::domain::VideoQuality::Best,
+            )
+            .unwrap(),
+        );
+        assert_eq!(target, None);
+        let (selector, target) = video_format_selection(DownloadPreset::Flac);
+        assert_eq!((selector.as_str(), target), ("bestaudio/best", None));
+    }
+
+    #[test]
+    fn test_probe_args_always_bound_the_listing() {
+        // The URL shape does not choose the arguments: a single video gets the
+        // same bounded flat listing flags (they are no-ops for a video), so a
+        // playlist the shape heuristic misses is still listed quickly.
         let video = MediaUrl::parse("https://www.youtube.com/watch?v=abc").unwrap();
         let video_args = build_probe_args(&video, None, None);
-        assert!(!video_args.iter().any(|a| a == "--flat-playlist"));
-        assert!(!video_args.iter().any(|a| a == "--playlist-end"));
+        assert!(video_args.iter().any(|a| a == "--flat-playlist"));
+        assert!(video_args.iter().any(|a| a == "--playlist-end"));
         assert_eq!(video_args.last().map(String::as_str), Some(video.as_str()));
 
         let playlist = MediaUrl::parse("https://www.youtube.com/playlist?list=PL42").unwrap();
@@ -865,7 +1006,7 @@ mod tests {
                 {"url": "https://www.youtube.com/watch?v=aaa", "title": "Première", "duration": 61,
                  "thumbnails": [{"url": "https://i.ytimg.com/vi/aaa/hqdefault.jpg"}]},
                 {"url": "https://www.youtube.com/watch?v=bbb", "title": "[Private video]", "duration": null},
-                {"id": "ccc", "title": "Sans url"}
+                {"id": "ccc", "ie_key": "Youtube", "title": "Sans url"}
             ]
         }"#;
         let parsed: serde_json::Value =
@@ -894,7 +1035,7 @@ mod tests {
         assert!(!result.entries[1].available);
         assert_eq!(result.entries[1].title, "[Private video]");
 
-        // No `url`, but an `id`: the watch URL is rebuilt.
+        // A YouTube entry with no `url` but an `id`: the watch URL is rebuilt.
         assert_eq!(result.entries[2].index, 3);
         assert_eq!(
             result.entries[2].url.as_str(),
@@ -924,7 +1065,8 @@ mod tests {
             {"title": "Ni url ni id"},
             {"url": "file:///etc/passwd", "title": "Schéma interdit"},
             {"url": "http://127.0.0.1/watch", "title": "Adresse locale"},
-            {"id": "ok1", "title": "Valide"}
+            {"id": "123456", "ie_key": "Vimeo", "title": "Autre site sans url"},
+            {"id": "ok1", "ie_key": "Youtube", "title": "Valide"}
         ]}"#;
         let parsed: serde_json::Value =
             serde_json::from_str(raw).expect("fixture must be valid JSON");
@@ -934,7 +1076,8 @@ mod tests {
         let result = playlist_probe_result(&url, &parsed);
 
         // Entries without a usable, validated URL are dropped entirely: the frontend
-        // can never receive an address that `MediaUrl` would reject.
+        // can never receive an address that `MediaUrl` would reject. An id from
+        // another site is never turned into a YouTube URL.
         assert_eq!(result.entries.len(), 1);
         assert_eq!(result.entries[0].title, "Valide");
     }

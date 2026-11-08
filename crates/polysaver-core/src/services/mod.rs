@@ -11,4 +11,4 @@ pub use analyze::AnalyzeUrlService;
 pub use detect_playlist::DetectPlaylistService;
 pub use limiter::{ConcurrencyLimiter, ConcurrencyPermit};
 pub use retry::RetryPolicy;
-pub use start_download::{EngineUpdater, StartDownloadService};
+pub use start_download::{EngineUpdater, PlaylistItemRequest, StartDownloadService};

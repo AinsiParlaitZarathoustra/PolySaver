@@ -67,7 +67,7 @@ function asLookup(translate: (key: never) => string): (key: string) => string {
 
 export const App: React.FC = () => {
   const { t } = useTranslation();
-  const { settings, updateSettings, status: saveStatus, errorMessage: saveErrorMessage } =
+  const { settings, updateSettings, errorMessage: saveErrorMessage } =
     useAutosaveSettings(defaultIpcClient);
 
   const [jobs, setJobs] = useState<DownloadJobDto[]>([]);
@@ -389,11 +389,21 @@ export const App: React.FC = () => {
         // cancellation, retry and history entry. A failure here must never be silent.
         if (selectedUrls && selectedUrls.length > 0) {
           try {
+            // Positions come from the listing, so files are numbered in playlist
+            // order whatever subset was checked.
+            const positions = new Map(
+              (probeResult?.entries ?? []).map((entry) => [entry.url, entry.index]),
+            );
+            const entries = selectedUrls.map((url, i) => ({
+              url,
+              position: positions.get(url) ?? i + 1,
+            }));
             const queued = await defaultIpcClient.startPlaylistDownload(
               dialogUrl,
               chosenPreset,
               outputDir,
-              selectedUrls,
+              entries,
+              probeResult?.title ?? '',
             );
             setJobs((prev) => {
               const known = new Set(prev.map((j) => j.id));
@@ -426,7 +436,7 @@ export const App: React.FC = () => {
         setIsSubmittingGuided(false);
       }
     },
-    [dialogUrl, settings.downloadDirectory, t],
+    [dialogUrl, probeResult, settings.downloadDirectory, t],
   );
 
   // Cancel active job in pipeline
@@ -620,7 +630,6 @@ export const App: React.FC = () => {
           onClose={() => setSettingsOpen(false)}
           settings={settings}
           onUpdateSettings={updateSettings}
-          saveStatus={saveStatus}
           errorMessage={saveErrorMessage}
           onBrowseDirectory={(path) => defaultIpcClient.pickDirectory(path)}
           onOpenJsRuntimeSetup={() => setJsRuntimeDialogOpen(true)}

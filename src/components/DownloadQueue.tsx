@@ -17,6 +17,9 @@ import {
   Collapse,
 } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
+import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
+import PlaylistPlayIcon from '@mui/icons-material/PlaylistPlay';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
@@ -69,19 +72,241 @@ export const DownloadQueue: React.FC<DownloadQueueProps> = ({
         {t('queue.title')} ({jobs.length})
       </Typography>
 
-      {jobs.map((job) => (
-        <DownloadJobCard
-          key={job.id}
-          job={job}
-          onDismiss={onDismissJob ? () => onDismissJob(job.id) : undefined}
-          onCancel={onCancelJob ? () => onCancelJob(job.id) : undefined}
-          onRetry={onRetryJob ? () => onRetryJob(job.id) : undefined}
-          onUpdateEngine={onUpdateEngine}
-          isUpdatingEngine={isUpdatingEngine}
-          onError={onError}
-        />
-      ))}
+      {groupQueueItems(jobs).map((item) =>
+        item.kind === 'playlist' ? (
+          <PlaylistGroupCard
+            key={`playlist-${item.id}`}
+            title={item.title}
+            jobs={item.jobs}
+            onDismissJob={onDismissJob}
+            onCancelJob={onCancelJob}
+            onRetryJob={onRetryJob}
+            onUpdateEngine={onUpdateEngine}
+            isUpdatingEngine={isUpdatingEngine}
+            onError={onError}
+          />
+        ) : (
+          <DownloadJobCard
+            key={item.job.id}
+            job={item.job}
+            onDismiss={onDismissJob ? () => onDismissJob(item.job.id) : undefined}
+            onCancel={onCancelJob ? () => onCancelJob(item.job.id) : undefined}
+            onRetry={onRetryJob ? () => onRetryJob(item.job.id) : undefined}
+            onUpdateEngine={onUpdateEngine}
+            isUpdatingEngine={isUpdatingEngine}
+            onError={onError}
+          />
+        ),
+      )}
     </Stack>
+  );
+};
+
+type QueueItem =
+  | { kind: 'job'; job: DownloadJobDto }
+  | { kind: 'playlist'; id: string; title: string; jobs: DownloadJobDto[] };
+
+/**
+ * Folds the videos of one playlist submission into a single queue item, placed
+ * where its first video appears, with its videos in playlist order.
+ */
+export function groupQueueItems(jobs: DownloadJobDto[]): QueueItem[] {
+  const items: QueueItem[] = [];
+  const groups = new Map<string, { kind: 'playlist'; id: string; title: string; jobs: DownloadJobDto[] }>();
+  for (const job of jobs) {
+    const playlist = job.playlist;
+    if (!playlist) {
+      items.push({ kind: 'job', job });
+      continue;
+    }
+    let group = groups.get(playlist.id);
+    if (!group) {
+      group = { kind: 'playlist', id: playlist.id, title: playlist.title, jobs: [] };
+      groups.set(playlist.id, group);
+      items.push(group);
+    }
+    group.jobs.push(job);
+  }
+  for (const group of groups.values()) {
+    group.jobs.sort((a, b) => (a.playlist?.position ?? 0) - (b.playlist?.position ?? 0));
+  }
+  return items;
+}
+
+const TERMINAL_STATUSES: DownloadStatus[] = ['completed', 'failed', 'canceled'];
+
+/**
+ * One playlist download: a header with overall progress and bulk actions, and
+ * the videos themselves (each with its own progress bar) behind the arrow.
+ */
+const PlaylistGroupCard: React.FC<{
+  title: string;
+  jobs: DownloadJobDto[];
+  onDismissJob?: (id: string) => Promise<void>;
+  onCancelJob?: (id: string) => Promise<void>;
+  onRetryJob?: (id: string) => void;
+  onUpdateEngine?: () => void;
+  isUpdatingEngine?: boolean;
+  onError?: (message: string) => void;
+}> = ({
+  title,
+  jobs,
+  onDismissJob,
+  onCancelJob,
+  onRetryJob,
+  onUpdateEngine,
+  isUpdatingEngine = false,
+  onError,
+}) => {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+
+  const completed = jobs.filter((j) => j.status === 'completed');
+  const failed = jobs.filter((j) => j.status === 'failed');
+  const active = jobs.filter((j) => !TERMINAL_STATUSES.includes(j.status));
+  const allDone = active.length === 0;
+  // Finished videos count as 100 %, so the bar ends full even with failures.
+  const overallPercent = Math.round(
+    jobs.reduce(
+      (sum, j) =>
+        sum + (TERMINAL_STATUSES.includes(j.status) ? 100 : (j.progressPercent ?? 0)),
+      0,
+    ) / jobs.length,
+  );
+
+  const toggleLabel = expanded ? t('queue.playlist.collapseAria') : t('queue.playlist.expandAria');
+
+  return (
+    <Card
+      variant="outlined"
+      sx={{
+        p: 2.5,
+        borderRadius: 3,
+        bgcolor: (theme) => (theme.palette.mode === 'dark' ? '#131b2e' : '#ffffff'),
+        borderColor: (theme) =>
+          allDone && failed.length > 0
+            ? theme.palette.error.main
+            : allDone
+              ? theme.palette.success.main
+              : 'divider',
+      }}
+    >
+      <CardContent sx={{ p: '0 !important' }}>
+        <Stack spacing={1.5}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <Tooltip title={toggleLabel} arrow>
+              <IconButton
+                size="small"
+                onClick={() => setExpanded((open) => !open)}
+                aria-label={toggleLabel}
+                aria-expanded={expanded}
+              >
+                {expanded ? <KeyboardArrowDownIcon /> : <KeyboardArrowRightIcon />}
+              </IconButton>
+            </Tooltip>
+            <PlaylistPlayIcon color="primary" />
+            <Box sx={{ minWidth: 0, flex: 1 }}>
+              <Typography
+                variant="subtitle1"
+                sx={{
+                  fontWeight: 600,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {title}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {allDone
+                  ? t('queue.playlist.summary', {
+                      completed: completed.length,
+                      failed: failed.length,
+                    })
+                  : [
+                      t('queue.playlist.progress', { done: completed.length, total: jobs.length }),
+                      failed.length > 0
+                        ? t('queue.playlist.failedCount', { count: failed.length })
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+              </Typography>
+            </Box>
+
+            <Chip
+              size="small"
+              label={t('queue.playlist.label')}
+              variant="outlined"
+              color="primary"
+              sx={{ fontWeight: 600, flexShrink: 0 }}
+            />
+
+            {failed.length > 0 && onRetryJob && (
+              <Button
+                size="small"
+                startIcon={<RefreshIcon />}
+                onClick={() => failed.forEach((j) => onRetryJob(j.id))}
+                sx={{ flexShrink: 0 }}
+              >
+                {t('queue.playlist.retryFailed', { count: failed.length })}
+              </Button>
+            )}
+            {active.length > 0 && onCancelJob && (
+              <Button
+                size="small"
+                color="inherit"
+                onClick={() => active.forEach((j) => void onCancelJob(j.id))}
+                sx={{ flexShrink: 0 }}
+              >
+                {t('queue.playlist.cancelAll')}
+              </Button>
+            )}
+            {allDone && onDismissJob && (
+              <Tooltip title={t('queue.playlist.dismiss')} arrow>
+                <IconButton
+                  size="small"
+                  onClick={() => jobs.forEach((j) => void onDismissJob(j.id))}
+                  aria-label={t('queue.playlist.dismiss')}
+                  sx={{ color: 'text.secondary', flexShrink: 0 }}
+                >
+                  <CloseIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
+          </Box>
+
+          {!allDone && (
+            <LinearProgress
+              variant="determinate"
+              value={overallPercent}
+              aria-label={t('queue.playlist.progress', {
+                done: completed.length,
+                total: jobs.length,
+              })}
+              sx={{ height: 6, borderRadius: 3 }}
+            />
+          )}
+
+          <Collapse in={expanded} unmountOnExit>
+            <Stack spacing={1.5} sx={{ pt: 0.5 }}>
+              {jobs.map((job) => (
+                <DownloadJobCard
+                  key={job.id}
+                  job={job}
+                  onDismiss={onDismissJob ? () => onDismissJob(job.id) : undefined}
+                  onCancel={onCancelJob ? () => onCancelJob(job.id) : undefined}
+                  onRetry={onRetryJob ? () => onRetryJob(job.id) : undefined}
+                  onUpdateEngine={onUpdateEngine}
+                  isUpdatingEngine={isUpdatingEngine}
+                  onError={onError}
+                />
+              ))}
+            </Stack>
+          </Collapse>
+        </Stack>
+      </CardContent>
+    </Card>
   );
 };
 

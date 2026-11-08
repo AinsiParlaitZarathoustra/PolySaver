@@ -60,7 +60,7 @@ const playlistProbe: ProbeResult = {
     },
   ],
   playlistTotal: 2,
-  entriesLimit: 200,
+  entriesLimit: 100,
 };
 
 function job(id: string, url: string): DownloadJobDto {
@@ -129,9 +129,10 @@ describe('Sprint 5: playlist mode end-to-end (App wiring)', () => {
         { format: 'mp4', videoQuality: 'p1080' },
         undefined,
         [
-          'https://www.youtube.com/watch?v=first111',
-          'https://www.youtube.com/watch?v=second222',
+          { url: 'https://www.youtube.com/watch?v=first111', position: 1 },
+          { url: 'https://www.youtube.com/watch?v=second222', position: 2 },
         ],
+        'Ma playlist',
       );
     });
 

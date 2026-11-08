@@ -94,9 +94,13 @@ describe('sizeEstimate', () => {
   });
 
   it('never formats a size with a tilde prefix', () => {
-    expect(formatBytes(3_870_000)).toBe('4 MB');
-    expect(formatBytes(540_000_000)).toBe('515 MB');
-    expect(formatBytes(2_000_000_000)).toBe('1.9 GB');
+    // French (default): Mo / Go with a decimal comma.
+    expect(formatBytes(3_870_000)).toBe('4 Mo');
+    expect(formatBytes(540_000_000)).toBe('515 Mo');
+    expect(formatBytes(2_000_000_000)).toBe('1,9 Go');
+    // English: MB / GB.
+    expect(formatBytes(3_870_000, 'en')).toBe('4 MB');
+    expect(formatBytes(2_000_000_000, 'en')).toBe('1.9 GB');
     for (const bytes of [1_000, 3_870_000, 540_000_000, 2_000_000_000]) {
       expect(formatBytes(bytes)).not.toContain('~');
     }

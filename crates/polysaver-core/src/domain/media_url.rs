@@ -156,16 +156,24 @@ impl TryFrom<String> for MediaUrl {
 /// single item: YouTube playlists and channel pages (`/channel`, `/c/`, `/user/`,
 /// `/@handle`, including their `/videos`, `/streams` and `/shorts` sub-pages).
 ///
+/// A post under a handle (`/@user/video/<id>`, `/@user/photo/<id>` on TikTok) is
+/// a single item, not the profile listing.
+///
 /// `list=` alone is handled separately by [`MediaUrl::kind`]: it is a YouTube
 /// convention and only means "playlist" there.
 #[must_use]
 pub fn is_playlist_path(path: &str) -> bool {
     let path = path.to_ascii_lowercase();
+    if let Some(rest) = path.strip_prefix("/@") {
+        let mut segments = rest.split('/').skip(1);
+        let is_post = matches!(segments.next(), Some("video" | "photo"))
+            && segments.next().is_some_and(|id| !id.is_empty());
+        return !is_post;
+    }
     path.starts_with("/playlist")
         || path.starts_with("/channel")
         || path.starts_with("/c/")
         || path.starts_with("/user/")
-        || path.starts_with("/@")
 }
 
 /// Returns true when the URL points at a SoundCloud set (their playlist form).

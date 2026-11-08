@@ -9,7 +9,7 @@ pub mod media_url;
 pub mod probe;
 pub mod settings;
 
-pub use download_job::{DownloadId, DownloadJob, DownloadStatus};
+pub use download_job::{DownloadId, DownloadJob, DownloadStatus, PlaylistMembership};
 pub use engine_version::{OUTDATED_THRESHOLD_DAYS, is_version_outdated, version_age_days};
 pub use format::{
     DownloadPreset, DownloadPresetDto, Language, Mp3Quality, OutputFormat, ThemeMode, VideoQuality,

@@ -50,6 +50,7 @@ describe('Sprint 8.4: Help, Support and Updater', () => {
     revealHistoryFile: vi.fn(),
     openHistoryFile: vi.fn(),
     openHistorySourceUrl: vi.fn(),
+    getHistoryThumbnail: vi.fn().mockResolvedValue(null),
     openSupportPage: vi.fn().mockResolvedValue(undefined),
     openContactEmail: vi.fn().mockResolvedValue(undefined),
     checkForUpdates: vi.fn().mockResolvedValue(null),

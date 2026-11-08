@@ -122,6 +122,24 @@ function getQualityMeta(
   }
 }
 
+/**
+ * Picks the offered quality closest to `wanted`, with the engine's rule: the
+ * highest one not above it, else the lowest one above it (4K wanted, 1080p
+ * max -> 1080p; 144p wanted, 240p min -> 240p). `best` takes the highest.
+ */
+export function closestAvailableQuality(
+  wanted: VideoQuality,
+  offered: { quality: VideoQuality; height: number }[],
+): VideoQuality {
+  if (offered.length === 0) return 'best';
+  if (offered.some((q) => q.quality === wanted)) return wanted;
+  const byHeight = [...offered].sort((a, b) => b.height - a.height);
+  if (wanted === 'best') return byHeight[0].quality;
+  const target = Number(wanted.slice(1));
+  const notAbove = byHeight.find((q) => q.height <= target);
+  return (notAbove ?? byHeight[byHeight.length - 1]).quality;
+}
+
 /// Quality order used for a playlist, where the flat enumeration exposes no
 /// per-video format information, so the full static list is offered instead.
 const PLAYLIST_QUALITY_ORDER: VideoQuality[] = [
@@ -147,7 +165,8 @@ export const DownloadOptionsDialog: React.FC<DownloadOptionsDialogProps> = ({
   onConfirmDownload,
   isSubmitting = false,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const sizeLanguage = i18n.language === 'en' ? 'en' : 'fr';
   const theme = useTheme();
   const fullScreen = useMediaQuery(theme.breakpoints.down('sm'));
 
@@ -188,9 +207,9 @@ export const DownloadOptionsDialog: React.FC<DownloadOptionsDialogProps> = ({
       return PLAYLIST_QUALITY_ORDER.map((q) => getQualityMeta(q, t('dialog.bestQuality')));
     }
 
-    const list: { quality: VideoQuality; label: string; height: number }[] = [
-      getQualityMeta('best', t('dialog.bestQuality')),
-    ];
+    // A single video lists its real qualities only: the first one already is
+    // the best, so a separate "Best" entry would be a duplicate.
+    const list: { quality: VideoQuality; label: string; height: number }[] = [];
 
     if (probeResult?.availableVideoQualities && probeResult.availableVideoQualities.length > 0) {
       for (const q of probeResult.availableVideoQualities) {
@@ -216,6 +235,11 @@ export const DownloadOptionsDialog: React.FC<DownloadOptionsDialogProps> = ({
       }
     }
 
+    // No video quality could be read (audio-only source, missing formats):
+    // keep a single "Best" choice so a video download stays possible.
+    if (list.length === 0) {
+      list.push(getQualityMeta('best', t('dialog.bestQuality')));
+    }
     return list;
   }, [probeResult, t]);
 
@@ -236,12 +260,10 @@ export const DownloadOptionsDialog: React.FC<DownloadOptionsDialogProps> = ({
         setCategory('video');
         setVideoFormat(defaultPreset.format);
 
-        // If default quality is available on this video, pick it; otherwise select 'best'
-        const candidateQuality = defaultPreset.videoQuality ?? 'best';
-        const isCandidateAvailable = videoQualities.some(
-          (vq) => vq.quality === candidateQuality,
+        // Preselect the default quality, or the closest one this video offers.
+        setVideoQuality(
+          closestAvailableQuality(defaultPreset.videoQuality ?? 'best', videoQualities),
         );
-        setVideoQuality(isCandidateAvailable ? candidateQuality : 'best');
       }
     }
   }, [open, defaultPreset, defaultDownloadDirectory, videoQualities, probeResult]);
@@ -347,7 +369,7 @@ export const DownloadOptionsDialog: React.FC<DownloadOptionsDialogProps> = ({
       targetHeight,
       probeResult.durationSeconds,
     );
-    return formatBytes(estimate) || null;
+    return formatBytes(estimate, sizeLanguage) || null;
   };
 
   const hasSafeThumbnail =

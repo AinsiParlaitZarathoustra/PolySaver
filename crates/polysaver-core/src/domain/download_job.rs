@@ -80,6 +80,41 @@ pub enum DownloadStatus {
     Canceled,
 }
 
+/// Membership of a job in a playlist download.
+///
+/// Every video of a playlist stays an independent job (own progress,
+/// cancellation, retry, history); this only lets the UI group them and the
+/// pipeline number the files in playlist order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlaylistMembership {
+    /// Shared by every job queued from the same playlist submission.
+    pub group_id: Uuid,
+    /// Playlist title, as shown to the user.
+    pub title: String,
+    /// 1-based position of the video in the playlist.
+    pub position: u32,
+    /// Number of videos queued for this playlist submission.
+    pub total: u32,
+    /// Highest position in the submission. Every file of the group is padded to
+    /// its digit count, so names sort in playlist order (`099` before `140`).
+    pub last_position: u32,
+}
+
+impl PlaylistMembership {
+    /// File name prefix keeping playlist order, e.g. `"07 - "`: at least two
+    /// digits, and the same width for the whole group.
+    #[must_use]
+    pub fn file_prefix(&self) -> String {
+        let width = self
+            .last_position
+            .max(self.position)
+            .to_string()
+            .len()
+            .max(2);
+        format!("{:0width$} - ", self.position)
+    }
+}
+
 /// Sovereign domain model of a download job.
 /// All fields are private to guarantee invariant enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -98,6 +133,7 @@ pub struct DownloadJob {
     error_details: Option<DownloadErrorDetails>,
     target_dir: Option<PathBuf>,
     retry_count: u8,
+    playlist: Option<PlaylistMembership>,
 }
 
 impl DownloadJob {
@@ -119,6 +155,7 @@ impl DownloadJob {
             error_details: None,
             target_dir: None,
             retry_count: 0,
+            playlist: None,
         }
     }
 
@@ -187,6 +224,28 @@ impl DownloadJob {
     /// Records the destination directory chosen for this job (used for faithful retries).
     pub fn set_target_dir(&mut self, target_dir: PathBuf) {
         self.target_dir = Some(target_dir);
+    }
+
+    /// Replaces the requested video quality with the one actually delivered.
+    ///
+    /// The engine falls back to the closest available quality (4K asked on a
+    /// 1080p video gives 1080p), and the queue and history must show what the
+    /// file really is. Audio presets are left untouched.
+    pub fn record_delivered_quality(&mut self, quality: crate::domain::format::VideoQuality) {
+        if let DownloadPreset::Video { format, .. } = self.preset {
+            self.preset = DownloadPreset::Video { format, quality };
+        }
+    }
+
+    /// Playlist this job was queued from, if any.
+    #[must_use]
+    pub const fn playlist(&self) -> Option<&PlaylistMembership> {
+        self.playlist.as_ref()
+    }
+
+    /// Records the playlist this job belongs to (kept across retries).
+    pub fn set_playlist(&mut self, playlist: PlaylistMembership) {
+        self.playlist = Some(playlist);
     }
 
     /// Number of automatic retry attempts already performed for this job.
@@ -431,5 +490,28 @@ impl DownloadJob {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_playlist_file_prefix_keeps_names_sorted() {
+        let membership = |position, last_position| PlaylistMembership {
+            group_id: Uuid::new_v4(),
+            title: "Playlist".to_string(),
+            position,
+            total: 3,
+            last_position,
+        };
+        assert_eq!(membership(7, 12).file_prefix(), "07 - ");
+        assert_eq!(membership(1, 1).file_prefix(), "01 - ");
+        // The whole group shares the width of its highest position, so names
+        // sort in playlist order even across 99 -> 100.
+        assert_eq!(membership(5, 100).file_prefix(), "005 - ");
+        assert_eq!(membership(99, 100).file_prefix(), "099 - ");
+        assert_eq!(membership(100, 100).file_prefix(), "100 - ");
     }
 }

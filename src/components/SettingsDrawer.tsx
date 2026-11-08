@@ -33,7 +33,6 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import UpgradeIcon from '@mui/icons-material/Upgrade';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
-import CheckIcon from '@mui/icons-material/Check';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import { useTranslation } from 'react-i18next';
 import type {
@@ -49,7 +48,6 @@ import type {
   VideoQuality,
 } from '../ipc/contracts';
 import { defaultIpcClient } from '../ipc/client';
-import type { AutosaveStatus } from '../features/settings/useAutosaveSettings';
 
 interface SettingsDrawerProps {
   open: boolean;
@@ -59,7 +57,6 @@ interface SettingsDrawerProps {
     update: Partial<AppSettingsDto> | ((prev: AppSettingsDto) => AppSettingsDto),
     immediate?: boolean,
   ) => void;
-  saveStatus: AutosaveStatus;
   errorMessage?: string | null;
   onBrowseDirectory?: (defaultPath?: string) => Promise<string | null>;
   /** Allows reopening the JavaScript runtime setup dialog from diagnostics. */
@@ -71,7 +68,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   onClose,
   settings,
   onUpdateSettings,
-  saveStatus,
   errorMessage,
   onBrowseDirectory,
   onOpenJsRuntimeSetup,
@@ -361,25 +357,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
           <Typography variant="h6" sx={{ fontWeight: 700 }}>
             {t('settings.title')}
           </Typography>
-          {saveStatus === 'saving' && (
-            <Chip
-              icon={<CircularProgress size={12} color="inherit" />}
-              label={t('settings.autosave.saving')}
-              size="small"
-              variant="outlined"
-              sx={{ height: 22, fontSize: '0.75rem' }}
-            />
-          )}
-          {saveStatus === 'saved' && (
-            <Chip
-              icon={<CheckIcon fontSize="small" />}
-              label={t('settings.autosave.saved')}
-              size="small"
-              color="success"
-              variant="outlined"
-              sx={{ height: 22, fontSize: '0.75rem' }}
-            />
-          )}
         </Box>
         <IconButton onClick={onClose} aria-label={t('settings.closeAria')} size="small">
           <CloseIcon />

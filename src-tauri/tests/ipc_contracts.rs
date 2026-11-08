@@ -36,6 +36,28 @@ fn test_download_job_dto_serialization_camel_case() {
     assert!(serialized.contains("\"destinationPath\""));
     assert!(serialized.contains("\"errorMessage\""));
     assert!(serialized.contains("\"videoQuality\":\"p1080\""));
+    // A video downloaded on its own carries no playlist group.
+    assert!(!serialized.contains("\"playlist\""));
+}
+
+#[test]
+fn test_download_job_dto_exposes_its_playlist_group() {
+    let url = MediaUrl::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap();
+    let preset = DownloadPreset::video(OutputFormat::Mp4, VideoQuality::Best).unwrap();
+    let mut job = DownloadJob::new(url, preset);
+    let group_id = uuid::Uuid::new_v4();
+    job.set_playlist(polysaver_core::domain::PlaylistMembership {
+        group_id,
+        title: "Ma playlist".to_string(),
+        position: 3,
+        total: 12,
+        last_position: 40,
+    });
+
+    let serialized = serde_json::to_string(&DownloadJobDto::from(&job)).unwrap();
+    assert!(serialized.contains(&format!(
+        "\"playlist\":{{\"id\":\"{group_id}\",\"title\":\"Ma playlist\",\"position\":3,\"total\":12}}"
+    )));
 }
 
 #[test]
@@ -198,7 +220,7 @@ fn test_probe_result_dto_carries_playlist_shape() {
 
     assert!(serialized.contains("\"kind\":\"playlist\""));
     assert!(serialized.contains("\"playlistTotal\":12000"));
-    assert!(serialized.contains("\"entriesLimit\":200"));
+    assert!(serialized.contains("\"entriesLimit\":100"));
     assert!(serialized.contains("\"title\":\"Première\""));
     assert!(serialized.contains("\"durationSeconds\":61"));
     assert!(serialized.contains("\"available\":false"));
@@ -231,20 +253,23 @@ fn test_start_playlist_download_request_deserialization() {
         "url": "https://www.youtube.com/playlist?list=PL123",
         "preset": { "format": "mp4", "videoQuality": "p720" },
         "outputDirectory": null,
-        "selectedUrls": [
-            "https://www.youtube.com/watch?v=aaa",
-            "https://www.youtube.com/watch?v=bbb"
+        "playlistTitle": "Ma playlist",
+        "entries": [
+            { "url": "https://www.youtube.com/watch?v=aaa", "position": 1 },
+            { "url": "https://www.youtube.com/watch?v=bbb", "position": 7 }
         ]
     }"#;
 
     let parsed: StartPlaylistDownloadRequestDto = serde_json::from_str(raw_json).unwrap();
     assert_eq!(parsed.url, "https://www.youtube.com/playlist?list=PL123");
-    assert_eq!(parsed.selected_urls.len(), 2);
+    assert_eq!(parsed.playlist_title, "Ma playlist");
+    assert_eq!(parsed.entries.len(), 2);
+    assert_eq!(parsed.entries[1].position, 7);
     assert!(parsed.output_directory.is_none());
 
     // Every entry re-validates through the same gate as a single download.
-    for raw in &parsed.selected_urls {
-        assert!(MediaUrl::parse(raw).is_ok());
+    for entry in &parsed.entries {
+        assert!(MediaUrl::parse(&entry.url).is_ok());
     }
     assert!(MediaUrl::parse("file:///etc/passwd").is_err());
 }

@@ -80,6 +80,17 @@ export const en: LocaleResource = {
     errorDetailsComponent: 'Component',
     errorDetailsExitCode: 'Exit code',
     playlistQueued: '{{count}} videos added to the queue',
+    playlist: {
+      label: 'Playlist',
+      progress: '{{done}}/{{total}} downloaded',
+      failedCount: '{{count}} failed',
+      summary: '{{completed}} downloaded, {{failed}} failed',
+      retryFailed: 'Retry failed ({{count}})',
+      cancelAll: 'Cancel all',
+      dismiss: 'Remove the playlist from the queue',
+      expandAria: 'Show the playlist videos',
+      collapseAria: 'Hide the playlist videos',
+    },
   },
   history: {
     title: 'History',
@@ -130,10 +141,6 @@ export const en: LocaleResource = {
       ready: 'Operational',
       unavailable: 'Unavailable',
       refreshAria: 'Refresh diagnostics',
-    },
-    autosave: {
-      saving: 'Saving changes...',
-      saved: 'Preferences saved',
     },
   },
   help: {

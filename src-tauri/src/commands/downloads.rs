@@ -6,8 +6,10 @@ use crate::dto::IpcError;
 use crate::dto::history::DownloadHistoryEntryDto;
 use crate::dto::media::{DownloadJobDto, StartDownloadRequestDto, StartPlaylistDownloadRequestDto};
 use crate::path_resolver::resolve_user_directory;
+use base64::Engine;
 use polysaver_core::domain::history::HistoryEntryId;
 use polysaver_core::domain::{DownloadId, DownloadPreset, MediaUrl};
+use polysaver_core::services::PlaylistItemRequest;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -68,14 +70,23 @@ pub async fn start_playlist_download(
         None => None,
     };
 
-    let mut urls = Vec::with_capacity(request.selected_urls.len());
-    for raw in &request.selected_urls {
-        urls.push(MediaUrl::parse(raw).map_err(IpcError::from)?);
+    let mut items = Vec::with_capacity(request.entries.len());
+    for entry in &request.entries {
+        if entry.position == 0 {
+            return Err(IpcError::new(
+                "INVALID_PLAYLIST_ENTRY",
+                "Playlist positions start at 1.",
+            ));
+        }
+        items.push(PlaylistItemRequest {
+            url: MediaUrl::parse(&entry.url).map_err(IpcError::from)?,
+            position: entry.position,
+        });
     }
 
     let jobs = state
         .start_download_service
-        .start_download_batch(urls, preset, custom_output_dir)
+        .start_download_batch(items, &request.playlist_title, preset, custom_output_dir)
         .await
         .map_err(IpcError::from)?;
 
@@ -188,6 +199,26 @@ pub async fn remove_download_history_entry(
         .await
         .map_err(IpcError::from)?;
     Ok(())
+}
+
+/// IPC command returning a history item's thumbnail as a `data:image/jpeg` URL,
+/// or `None` when the source exposed no thumbnail.
+///
+/// Served from the local copy taken at download time: the history never
+/// contacts the source site to display it.
+#[tauri::command]
+pub async fn get_history_thumbnail(
+    state: State<'_, AppState>,
+    history_id: String,
+) -> Result<Option<String>, IpcError> {
+    let id = HistoryEntryId::try_from(history_id.as_str()).map_err(IpcError::from)?;
+    let thumbnail = state.start_download_service.get_history_thumbnail(id).await;
+    Ok(thumbnail.map(|bytes| {
+        format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }))
 }
 
 /// IPC command revealing a history item's downloaded file in Finder / file explorer.
